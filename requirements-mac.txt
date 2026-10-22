@@ -2,4 +2,6 @@ bleak
 sounddevice
 numpy
 mlx-whisper
+mlx-audio
+misaki[en]
 anthropic

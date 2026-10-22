@@ -142,8 +142,11 @@ class Brain:
 async def run(config: dict, device: int) -> None:
     from skelly_mac import speak
 
-    print("Loading speech model (first run downloads it)…", flush=True)
+    from skelly_mac import synthesize
+
+    print("Loading speech models (first run downloads them)…", flush=True)
     await asyncio.to_thread(transcribe, np.zeros(MIC_RATE, dtype=np.float32), config["whisper_model"])
+    await asyncio.to_thread(synthesize, "Boo.", config)
     brain = Brain(config.get("model", MODEL))
     listener = Listener(config["vad_threshold"], config.get("mic_device"))
     with listener.stream:

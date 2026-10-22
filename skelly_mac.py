@@ -33,10 +33,13 @@ BLE_NAME = "12ft Skelly"
 LIVE_NAME = "12ft Skelly(Live)"
 CONFIG_FILE = Path.home() / ".config" / "openskelly" / "mac.json"
 RATE = 44100
+TTS_MODELS = {"kokoro": "mlx-community/Kokoro-82M-bf16", "qwen": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit"}
 DEFAULTS = {
-    "voice": "Daniel",
-    # ponytail: pitch down + cavern echo via ffmpeg; swap speak() for ElevenLabs if `say` is not spooky enough
-    "voice_fx": "asetrate=44100*0.8,aresample=44100,atempo=1.08,aecho=0.8:0.85:50|110:0.45|0.25,loudnorm=I=-10:TP=-1",
+    "tts": "qwen",  # say | kokoro | qwen (VoiceDesign: describes the voice in `voice_instruct`)
+    "voice": "Daniel",  # `say -v` voice, or a Kokoro voice such as am_michael
+    "voice_instruct": "A deep, gravelly, booming male voice of an ancient giant skeleton; slow, menacing, "
+                      "theatrical, with a dry rasp and a hint of amusement.",
+    "voice_fx": "aecho=0.8:0.85:50|110:0.4|0.2,loudnorm=I=-10:TP=-1",  # ffmpeg chain; add asetrate=44100*0.8,aresample=44100 to pitch `say` down
     "whisper_model": "mlx-community/whisper-small-mlx",
     "vad_threshold": 0.02,
 }
@@ -160,12 +163,18 @@ async def disconnect_live(skelly: Skelly, live_mac: str) -> None:
         run("blueutil", "--disconnect", live_mac, timeout=10)
 
 
-def decode_audio(path: Path, filters: str | None) -> np.ndarray:
-    args = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path)]
+def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None = None) -> np.ndarray:
+    """ffmpeg -> 44.1 kHz stereo int16; `source` is a file, or raw mono float32 PCM at `in_rate`."""
+    args = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+    if isinstance(source, bytes):
+        args += ["-f", "f32le", "-ar", str(in_rate), "-ac", "1", "-i", "-"]
+    else:
+        args += ["-i", str(source)]
     if filters:
         args += ["-af", filters]
     args += ["-f", "s16le", "-ar", str(RATE), "-ac", "2", "-"]
-    raw = subprocess.run(args, check=True, capture_output=True, timeout=120).stdout
+    raw = subprocess.run(args, check=True, capture_output=True, timeout=120,
+                         input=source if isinstance(source, bytes) else None).stdout
     return np.frombuffer(raw, dtype=np.int16).reshape(-1, 2)
 
 
@@ -173,18 +182,42 @@ def play_pcm(pcm: np.ndarray, device: int) -> None:
     sd.play(pcm, RATE, device=device, blocking=True)
 
 
+_tts_model: object = None
+
+
+def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
+    """Text -> audio with the configured engine: a wav path, or (mono float32 PCM, rate); blocking."""
+    global _tts_model
+    if config["tts"] == "say":
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            path = Path(tmp.name)
+        subprocess.run(["say", "-v", config["voice"], "-o", str(path), f"--data-format=LEI16@{RATE}", "--", text],
+                       check=True, timeout=60)
+        return path, None
+    from mlx_audio.tts.utils import load_model
+
+    if _tts_model is None:
+        _tts_model = load_model(TTS_MODELS[config["tts"]])
+    if config["tts"] == "kokoro":
+        results = _tts_model.generate(text, voice=config["voice"], speed=0.85, lang_code="a")
+    else:
+        results = _tts_model.generate(text, instruct=config["voice_instruct"], lang_code="en")
+    chunks, rate = [], 24000
+    for result in results:
+        chunks.append(np.array(result.audio, dtype=np.float32))
+        rate = result.sample_rate
+    return np.concatenate(chunks).tobytes(), rate
+
+
 async def speak(text: str, config: dict, device: int) -> None:
-    """macOS TTS, pitched and echoed by ffmpeg, into the Skelly sink; the jaw follows the level."""
-    with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as tmp:
-        path = Path(tmp.name)
+    """TTS -> ffmpeg effects -> the Skelly sink; the jaw follows the audio level."""
+    source, rate = await asyncio.to_thread(synthesize, text, config)
     try:
-        proc = await asyncio.create_subprocess_exec("say", "-v", config["voice"], "-o", str(path), "--", text)
-        if await proc.wait() != 0:
-            raise RuntimeError("say failed")
-        pcm = await asyncio.to_thread(decode_audio, path, config["voice_fx"] or None)
-        await asyncio.to_thread(play_pcm, pcm, device)
+        pcm = await asyncio.to_thread(decode_audio, source, config["voice_fx"] or None, rate)
     finally:
-        path.unlink(missing_ok=True)
+        if isinstance(source, Path):
+            source.unlink(missing_ok=True)
+    await asyncio.to_thread(play_pcm, pcm, device)
 
 
 # ---------------------------------------------------------------- commands

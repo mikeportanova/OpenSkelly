@@ -119,5 +119,12 @@ export ANTHROPIC_API_KEY=...        # talk mode only
 `~/.config/openskelly/mac.json`. `lights`, `eyes` and `play` take the same
 arguments as the Linux CLI. Before the first `talk`, run
 `skelly_mac.py talk --listen-test` and set `vad_threshold` in `mac.json` just above
-the room's quiet level; `voice` picks any `say -v '?'` voice. macOS will ask for
-Bluetooth and Microphone permission for your terminal on first use.
+the room's quiet level. macOS will ask for Bluetooth and Microphone permission for
+your terminal on first use.
+
+The voice is picked by `tts` in `mac.json`: `qwen` (default; Qwen3-TTS VoiceDesign,
+on-device, the voice is whatever `voice_instruct` describes), `kokoro` (fast
+neural voice named by `voice`, e.g. `am_michael`) or `say` (macOS voice named by
+`voice`). `voice_fx` is an ffmpeg filter chain applied before the jaw; prepend
+`asetrate=44100*0.8,aresample=44100,` to pitch a voice down. Models download on
+first use (Qwen is about 1 GB).
