@@ -39,9 +39,12 @@ TTS_MODELS = {"kokoro": "mlx-community/Kokoro-82M-bf16", "qwen": "mlx-community/
 DEFAULTS = {
     "tts": "qwen",  # say | kokoro | qwen (VoiceDesign: describes the voice in `voice_instruct`)
     "voice": "Daniel",  # `say -v` voice, or a Kokoro voice such as am_michael
-    "voice_instruct": "A deep, gravelly, booming male voice of an ancient giant skeleton; slow, menacing, "
-                      "theatrical, with a dry rasp and a hint of amusement.",
-    "voice_fx": "aecho=0.8:0.85:50|110:0.4|0.2,loudnorm=I=-10:TP=-1",  # ffmpeg chain; add asetrate=44100*0.8,aresample=44100 to pitch `say` down
+    "voice_instruct": "A very deep, slow, rumbling male voice with a dry, gravelly rasp and a sinister chuckle; an "
+                      "ancient giant skeleton, theatrical and menacing like a horror movie villain, drawn-out words, "
+                      "cavernous and hollow.",
+    "voice_seed": 42,  # VoiceDesign samples a new voice per call; a fixed seed keeps the same skeleton every sentence
+    # ffmpeg chain before the jaw: slight pitch-down, cavern echo, loudness for the mouth threshold
+    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,loudnorm=I=-10:TP=-1",
     "whisper_model": "mlx-community/whisper-small-mlx",
     "vad_threshold": 0.02,
 }
@@ -203,6 +206,9 @@ def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
     if config["tts"] == "kokoro":
         results = _tts_model.generate(text, voice=config["voice"], speed=0.85, lang_code="a")
     else:
+        import mlx.core as mx
+
+        mx.random.seed(int(config["voice_seed"]))
         results = _tts_model.generate(text, instruct=config["voice_instruct"], lang_code="en")
     chunks, rate = [], 24000
     for result in results:
