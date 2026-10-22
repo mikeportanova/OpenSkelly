@@ -291,3 +291,76 @@ class BargeInTests(unittest.TestCase):
             self.assertEqual(listener.segmenter.threshold, 0.02)
 
         asyncio.run(go())
+
+
+class RefusalTests(unittest.TestCase):
+    def _brain(self, finals):
+        import asyncio
+
+        brain = talk.Brain.__new__(talk.Brain)
+        brain.messages, brain.model, brain.persona = [], "claude-sonnet-5-5", "p"
+        calls = []
+
+        class Stream:
+            def __init__(self, text, final):
+                self.text, self.final = text, final
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                pass
+
+            @property
+            def text_stream(self):
+                async def gen():
+                    yield self.text
+
+                return gen()
+
+            async def get_final_message(self):
+                return self.final
+
+        class Messages:
+            def stream(self, **kwargs):
+                calls.append(kwargs)
+                text, final = finals[len(calls) - 1]
+                return Stream(text, final)
+
+        brain.client = type("C", (), {"beta": type("B", (), {"messages": Messages()})()})()
+        return brain, calls
+
+    def _final(self, stop_reason, text=True):
+        block = type("T", (), {"type": "text", "text": "x"})()
+        details = type("D", (), {"category": "general_harms"})()
+        return type("F", (), {"stop_reason": stop_reason, "content": [block] if text else [], "stop_details": details})()
+
+    def test_refusal_before_any_sentence_retries_gently_then_answers(self):
+        import asyncio
+
+        brain, calls = self._brain([("I will eat", self._final("refusal", text=False)), ("Boo, silly goose!", self._final("end_turn"))])
+        said = asyncio.run(self._collect(brain))
+        self.assertEqual(said, ["Boo, silly goose!"])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["messages"][-1]["role"], "system")  # the gentle nudge
+        self.assertEqual([m["role"] for m in brain.messages], ["user", "assistant"])
+
+    def test_refusal_after_a_full_sentence_keeps_it_and_adds_nothing(self):
+        import asyncio
+
+        brain, calls = self._brain([("Hello there! I will now eat", self._final("refusal"))])
+        said = asyncio.run(self._collect(brain))
+        self.assertEqual(said, ["Hello there!"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(brain.messages[-1], {"role": "assistant", "content": "Hello there!"})
+
+    def test_double_refusal_gives_the_excuse(self):
+        import asyncio
+
+        brain, _ = self._brain([("", self._final("refusal", text=False)), ("", self._final("refusal", text=False))])
+        said = asyncio.run(self._collect(brain))
+        self.assertEqual(said, ["Hmm, that one rattled my skull. Ask me something else!"])
+        self.assertEqual(brain.messages, [])
+
+    async def _collect(self, brain):
+        return [s async for s in brain.reply("hi")]
