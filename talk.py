@@ -139,7 +139,7 @@ class Brain:
         del self.messages[:-40]
 
 
-async def run(config: dict) -> None:
+async def run(config: dict, device: int) -> None:
     from skelly_mac import speak
 
     print("Loading speech model (first run downloads it)…", flush=True)
@@ -158,7 +158,7 @@ async def run(config: dict) -> None:
                 print(f"kid:    {heard}", flush=True)
                 async for sentence in brain.reply(heard):
                     print(f"skelly: {sentence}", flush=True)
-                    await speak(sentence, config["voice"])
+                    await speak(sentence, config, device)
             except Exception as exc:
                 print(f"turn failed: {exc}", flush=True)
             finally:

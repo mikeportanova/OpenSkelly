@@ -44,11 +44,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(skelly_mac.paired_live_mac(output), "13:C0:02:6E:21:3C")
         self.assertIsNone(skelly_mac.paired_live_mac("address: 00-00-00-00-00-00, paired, name: \"12ft Skelly\"\n"))
 
-    def test_say_device(self):
-        listing = "  100 MacBook Pro Speakers\n  118 12ft Skelly(Live)\n   93 ZoomAudioDevice\n"
-        self.assertEqual(skelly_mac.say_device(listing), "118")
-        with self.assertRaises(RuntimeError):
-            skelly_mac.say_device("  100 MacBook Pro Speakers\n")
 
 
 if __name__ == "__main__":

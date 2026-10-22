@@ -9,6 +9,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -32,7 +33,13 @@ BLE_NAME = "12ft Skelly"
 LIVE_NAME = "12ft Skelly(Live)"
 CONFIG_FILE = Path.home() / ".config" / "openskelly" / "mac.json"
 RATE = 44100
-DEFAULTS = {"voice": "Daniel", "whisper_model": "mlx-community/whisper-small-mlx", "vad_threshold": 0.02}
+DEFAULTS = {
+    "voice": "Daniel",
+    # ponytail: pitch down + cavern echo via ffmpeg; swap speak() for ElevenLabs if `say` is not spooky enough
+    "voice_fx": "asetrate=44100*0.8,aresample=44100,atempo=1.08,aecho=0.8:0.85:50|110:0.45|0.25,loudnorm=I=-10:TP=-1",
+    "whisper_model": "mlx-community/whisper-small-mlx",
+    "vad_threshold": 0.02,
+}
 
 
 def load_config() -> dict:
@@ -139,6 +146,7 @@ async def connect_live(skelly: Skelly, live_mac: str) -> int:
         raise RuntimeError(f"could not connect {LIVE_NAME}; pair it first with: skelly_mac.py configure")
     await skelly.write(COMMANDS["select_bluetooth"], ack=ACK_BLUETOOTH)
     device = output_device_index()
+    run("osascript", "-e", "set volume output volume 100")  # a fresh BT sink defaults to 50
     await skelly.write(COMMANDS["start_live"])
     await asyncio.sleep(0.08)
     await skelly.write(COMMANDS["volume_100"])
@@ -165,21 +173,18 @@ def play_pcm(pcm: np.ndarray, device: int) -> None:
     sd.play(pcm, RATE, device=device, blocking=True)
 
 
-def say_device(listing: str, name: str = LIVE_NAME) -> str:
-    """Pick the `say -a` device id whose name contains `name` from `say -a '?'` output."""
-    for line in listing.splitlines():
-        match = re.match(r"\s*(\d+)\s+(.*)", line)
-        if match and name in match.group(2):
-            return match.group(1)
-    raise RuntimeError(f"`say` cannot see audio output {name!r}")
-
-
-async def speak(text: str, voice: str) -> None:
-    """macOS TTS straight into the Skelly sink; the jaw follows the audio level."""
-    device = say_device(run("say", "-a", "?"))
-    proc = await asyncio.create_subprocess_exec("say", "-a", device, "-v", voice, "--", text)
-    if await proc.wait() != 0:
-        raise RuntimeError("say failed; is the Skelly audio device connected?")
+async def speak(text: str, config: dict, device: int) -> None:
+    """macOS TTS, pitched and echoed by ffmpeg, into the Skelly sink; the jaw follows the level."""
+    with tempfile.NamedTemporaryFile(suffix=".aiff", delete=False) as tmp:
+        path = Path(tmp.name)
+    try:
+        proc = await asyncio.create_subprocess_exec("say", "-v", config["voice"], "-o", str(path), "--", text)
+        if await proc.wait() != 0:
+            raise RuntimeError("say failed")
+        pcm = await asyncio.to_thread(decode_audio, path, config["voice_fx"] or None)
+        await asyncio.to_thread(play_pcm, pcm, device)
+    finally:
+        path.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------- commands
@@ -213,6 +218,8 @@ async def cmd_configure(args: argparse.Namespace) -> int:
             run("blueutil", "--disconnect", live_mac)
     config = load_config() if CONFIG_FILE.exists() else dict(DEFAULTS)
     config.update({"ble_address": address, "live_mac": live_mac, "voice": args.voice or config["voice"]})
+    if args.voice_fx is not None:
+        config["voice_fx"] = args.voice_fx
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
     print(f"Saved {CONFIG_FILE}\n{json.dumps(config, indent=2)}")
@@ -242,10 +249,10 @@ async def cmd_play(path: Path) -> int:
 async def cmd_say(text: str) -> int:
     config = load_config()
     async with Skelly(config["ble_address"]) as skelly:
-        await connect_live(skelly, config["live_mac"])
+        device = await connect_live(skelly, config["live_mac"])
         try:
             await asyncio.sleep(1.5)  # let the connection chime finish before the first word
-            await speak(text, config["voice"])
+            await speak(text, config, device)
         finally:
             await disconnect_live(skelly, config["live_mac"])
     return 0
@@ -261,9 +268,9 @@ async def cmd_talk(args: argparse.Namespace) -> int:
         return talk.listen_test(config)
     config = load_config()
     async with Skelly(config["ble_address"]) as skelly:
-        await connect_live(skelly, config["live_mac"])
+        device = await connect_live(skelly, config["live_mac"])
         try:
-            await talk.run(config)
+            await talk.run(config, device)
         finally:
             await disconnect_live(skelly, config["live_mac"])
     return 0
@@ -277,6 +284,7 @@ def main() -> int:
     setup.add_argument("--live-mac")
     setup.add_argument("--pin")
     setup.add_argument("--voice", help="macOS `say` voice (see: say -v '?')")
+    setup.add_argument("--voice-fx", help="ffmpeg audio filter chain applied to the voice; empty string for none")
     lights = subs.add_parser("lights", help="control Skelly's RGB chest light")
     light_subs = lights.add_subparsers(dest="lights_action", required=True)
     color = light_subs.add_parser("color")
