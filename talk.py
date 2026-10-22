@@ -168,7 +168,10 @@ async def run(session: object, vad: bool = False) -> None:
     async def hear() -> np.ndarray | None:
         if window is None:
             return await listener.next_utterance()
-        window.set_state("idle")
+        if window.down:  # key already held (e.g. pressed while Skelly was talking)
+            window.pressed.set()
+        else:
+            window.set_state("idle")
         await window.pressed.wait()
         listener.begin()
         window.set_state("listening")
@@ -187,6 +190,10 @@ async def run(session: object, vad: bool = False) -> None:
                     window.set_state("thinking", heard="", said="")
                 heard = await asyncio.to_thread(transcribe, utterance, config["whisper_model"])
                 if not heard:
+                    print("kid:    (nothing understood)", flush=True)
+                    if window:
+                        window.set_state("idle", heard="I didn't catch that. Hold SPACE and speak up!")
+                        await asyncio.sleep(1.5)
                     continue
                 print(f"kid:    {heard}", flush=True)
                 if window:
@@ -199,7 +206,10 @@ async def run(session: object, vad: bool = False) -> None:
                             window.set_state("talking", said=f"Skelly: {sentence}")
                         await speak(sentence, config, session.device)
             except Exception as exc:
-                print(f"turn failed: {exc}", flush=True)
+                print(f"turn failed: {exc!r}", flush=True)
+                if window:
+                    window.set_state("idle", said=f"Error: {exc}"[:300])
+                    await asyncio.sleep(3)
             finally:
                 await asyncio.sleep(0.3)
                 listener.unmute()

@@ -26,6 +26,7 @@ class TalkWindow:
         self.said = tk.Label(self.root, text="", font=("Helvetica", 22, "italic"), wraplength=840, justify="center")
         self.said.pack(fill="x", padx=30, pady=(10, 40))
         self.down = False
+        self.pending_release: str | None = None
         self.pressed = asyncio.Event()
         self.released = asyncio.Event()
         self.closed = asyncio.Event()
@@ -39,12 +40,20 @@ class TalkWindow:
         self.root.focus_force()
 
     def _press(self, _event: tk.Event) -> None:
-        if not self.down:  # macOS key auto-repeat re-sends KeyPress while held
+        if self.pending_release is not None:  # key auto-repeat: release+press pairs while held
+            self.root.after_cancel(self.pending_release)
+            self.pending_release = None
+        if not self.down:
             self.down = True
             self.released.clear()
             self.pressed.set()
 
     def _release(self, _event: tk.Event) -> None:
+        if self.pending_release is None:
+            self.pending_release = self.root.after(80, self._confirm_release)
+
+    def _confirm_release(self) -> None:
+        self.pending_release = None
         if self.down:
             self.down = False
             self.pressed.clear()
