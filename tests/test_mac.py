@@ -133,15 +133,21 @@ class HandsFreeTests(unittest.TestCase):
             listener.rate, listener.muted, listener.recording, listener.handsfree = talk.MIC_RATE, False, None, False
             listener.queue, listener.loop = asyncio.Queue(), asyncio.get_running_loop()
             listener.segmenter = talk.Segmenter(0.02)
-            block = np.full((talk.BLOCK, 1), 0.1, dtype=np.float32)
-            listener._callback(block, talk.BLOCK, None, None)
+            quiet = np.full((talk.BLOCK, 1), 0.001, dtype=np.float32)
+            loud = np.full((talk.BLOCK, 1), 0.1, dtype=np.float32)
+            utterance = [quiet] * 5 + [loud] * 20 + [quiet] * 40
+
+            for block in utterance:
+                listener._callback(block, talk.BLOCK, None, None)
             await asyncio.sleep(0)
-            self.assertTrue(listener.queue.empty())  # push-to-talk: nothing piles up
-            self.assertAlmostEqual(listener.level, 0.1, places=3)
+            self.assertTrue(listener.queue.empty())  # push-to-talk: the VAD is idle
+            self.assertFalse(listener.segmenter.active)
+            self.assertAlmostEqual(listener.level, 0.001, places=3)
             listener.set_handsfree(True)
-            listener._callback(block, talk.BLOCK, None, None)
+            for block in utterance:
+                listener._callback(block, talk.BLOCK, None, None)
             await asyncio.sleep(0)
-            self.assertEqual(listener.queue.qsize(), 1)
+            self.assertEqual(listener.queue.qsize(), 1)  # one finished utterance, not raw blocks
 
         asyncio.run(go())
 
@@ -247,3 +253,41 @@ class InterruptTests(unittest.TestCase):
         finally:
             skelly_mac.synthesize_stream = original
         self.assertLess(got / 4 / skelly_mac.RATE, 10)  # far less than the 20 s it would have produced
+
+
+class BargeInTests(unittest.TestCase):
+    def test_threshold_sits_between_bleed_and_voice_or_is_off(self):
+        self.assertAlmostEqual(talk.pick_barge_threshold(0.004, 0.064), 0.016, places=4)
+        self.assertIsNone(talk.pick_barge_threshold(0.02, 0.03))
+        self.assertIsNone(talk.pick_barge_threshold(0.0, 0.03))
+
+    def test_voice_over_bleed_sets_barge_in_and_keeps_the_utterance(self):
+        import asyncio
+
+        async def go():
+            listener = talk.Listener.__new__(talk.Listener)
+            listener.rate, listener.muted, listener.recording, listener.handsfree = talk.MIC_RATE, True, None, True
+            listener.queue, listener.loop = asyncio.Queue(), asyncio.get_running_loop()
+            listener.segmenter = talk.Segmenter(0.02)
+            listener.vad_threshold = 0.02
+            listener.barge_in = asyncio.Event()
+            listener.segmenter.on_start = lambda: listener.loop.call_soon_threadsafe(listener.barge_in.set)
+            listener.arm_barge_in(0.05)
+            quiet = np.full((talk.BLOCK, 1), 0.03, dtype=np.float32)  # Skelly's bleed: under the barge threshold
+            loud = np.full((talk.BLOCK, 1), 0.2, dtype=np.float32)
+            for _ in range(10):
+                listener._callback(quiet, talk.BLOCK, None, None)
+            await asyncio.sleep(0)
+            self.assertFalse(listener.barge_in.is_set())
+            for _ in range(6):
+                listener._callback(loud, talk.BLOCK, None, None)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            self.assertTrue(listener.barge_in.is_set())
+            self.assertTrue(listener.segmenter.active)
+            listener.disarm_barge_in()
+            listener.unmute()  # not muted -> must NOT reset the utterance in progress
+            self.assertTrue(listener.segmenter.active)
+            self.assertEqual(listener.segmenter.threshold, 0.02)
+
+        asyncio.run(go())

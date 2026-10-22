@@ -66,7 +66,12 @@ DEFAULTS = {
     "vad_threshold": 0.02,  # hands-free: RMS above this is speech (talk --listen-test shows the room)
     "vad_silence": 1.2,  # hands-free: seconds of quiet that end a kid's turn
     "mic_device": None,  # input device name or substring, e.g. "Yeti"; None = system default
+    "barge_threshold": None,  # hands-free interrupt level, set by the window's Calibrate button
 }
+
+
+def save_config(config: dict) -> None:
+    CONFIG_FILE.write_text(json.dumps({k: v for k, v in config.items() if DEFAULTS.get(k) != v or k not in DEFAULTS}, indent=2) + "\n")
 
 
 def load_config() -> dict:

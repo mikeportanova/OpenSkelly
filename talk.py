@@ -35,6 +35,7 @@ class Segmenter:
         self.start_blocks, self.silence_blocks = start_blocks, silence_blocks
         self.min_blocks, self.max_blocks = min_blocks, max_blocks
         self.preroll: deque[np.ndarray] = deque(maxlen=preroll)
+        self.on_start: object = None  # called (from the audio thread) when speech begins
         self.reset()
 
     def reset(self) -> None:
@@ -51,6 +52,8 @@ class Segmenter:
             self.loud = self.loud + 1 if loud else 0
             if self.loud >= self.start_blocks:
                 self.active, self.silent, self.buffer = True, 0, list(self.preroll)
+                if self.on_start:
+                    self.on_start()
             return None
         self.buffer.append(block)
         self.silent = 0 if loud else self.silent + 1
@@ -86,6 +89,9 @@ class Listener:
         self.muted = False
         self.handsfree = False  # only then do blocks flow to the VAD queue
         self.level = 0.0  # last block RMS, for the meter
+        self.vad_threshold = threshold
+        self.barge_in = asyncio.Event()  # set when speech starts while Skelly is talking (armed only)
+        self.segmenter.on_start = lambda: self.loop.call_soon_threadsafe(self.barge_in.set)
         self.loop = asyncio.get_running_loop()
         self.rate = int(sd.query_devices(device, "input")["default_samplerate"])
         self.stream = sd.InputStream(samplerate=self.rate, channels=1, dtype="float32",
@@ -94,16 +100,32 @@ class Listener:
         self.recording: list[np.ndarray] | None = None
 
     def _callback(self, indata: np.ndarray, _frames: int, _time: object, _status: object) -> None:
+        """Audio thread: the VAD runs here so speech starts are seen even while Skelly is talking."""
         mono = indata[:, 0].copy()
         self.level = float(np.sqrt(np.mean(mono**2)))
         if self.recording is not None:
             self.recording.append(mono)
         elif self.handsfree and not self.muted:
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, mono)
+            utterance = self.segmenter.feed(mono)
+            if utterance is not None:
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, utterance)
 
     def set_handsfree(self, enabled: bool) -> None:
-        self.handsfree = enabled
-        self.unmute()
+        if enabled != self.handsfree:
+            self.handsfree = enabled
+            self.unmute()
+
+    def arm_barge_in(self, threshold: float) -> None:
+        """Skelly is about to talk: keep listening, but only a voice well above his bleed counts."""
+        self.segmenter.threshold = threshold
+        self.segmenter.start_blocks = 5  # 150 ms, so jaw clicks and echo transients do not trip it
+        self.barge_in.clear()
+        self.muted = False
+        self.segmenter.reset()
+
+    def disarm_barge_in(self) -> None:
+        self.segmenter.threshold = self.vad_threshold
+        self.segmenter.start_blocks = 3
 
     def begin(self) -> None:
         self.recording = []
@@ -119,16 +141,15 @@ class Listener:
         self.muted = True
 
     def unmute(self) -> None:
+        if not self.muted:
+            return  # an armed barge-in is mid-utterance: keep it
         while not self.queue.empty():
             self.queue.get_nowait()
         self.segmenter.reset()
         self.muted = False
 
     async def next_utterance(self) -> np.ndarray:
-        while True:
-            utterance = self.segmenter.feed(await self.queue.get())
-            if utterance is not None:
-                return to_whisper_rate(utterance, self.rate)
+        return to_whisper_rate(await self.queue.get(), self.rate)
 
 
 SHORT_OK = {"hi", "hello", "boo", "hey", "yes", "no", "bye", "trick or treat", "happy halloween", "hi skelly",
@@ -143,6 +164,13 @@ def plausible(text: str) -> bool:
     if not words or phrase in HALLUCINATIONS:
         return False
     return len(words) >= 3 or phrase in SHORT_OK
+
+
+def pick_barge_threshold(bleed: float, speech: float) -> float | None:
+    """Threshold between Skelly's bleed at the mic and a kid's voice; None when the margin is under 6 dB."""
+    if bleed <= 0 or speech <= bleed * 2:
+        return None
+    return float(np.sqrt(bleed * speech))
 
 
 def transcribe(audio: np.ndarray, model: str) -> str:
@@ -233,8 +261,10 @@ async def run(session: object, vad: bool = False) -> None:
     listener = Listener(config["vad_threshold"], config.get("mic_device"), float(config.get("vad_silence", 1.2)))
     listener.set_handsfree(vad)
     session.listener = listener
+    calibrating: list[asyncio.Task] = []
     if window:
         window.on_clear = brain.reset
+        window.on_calibrate = lambda: calibrating.append(asyncio.create_task(calibrate()))
         window.level_source = lambda: (listener.level, listener.segmenter.threshold)
         models = {**MODELS}
         if brain.model not in models.values():
@@ -260,6 +290,14 @@ async def run(session: object, vad: bool = False) -> None:
         if window is None:
             return await listener.next_utterance()
         while True:
+            while calibrating:
+                task = calibrating.pop(0)
+                listener.mute()
+                try:
+                    await task
+                except Exception as exc:
+                    print(f"calibration failed: {exc!r}", flush=True)
+                listener.unmute()
             window.mode_changed.clear()
             if window.handsfree:
                 listener.set_handsfree(True)
@@ -280,11 +318,49 @@ async def run(session: object, vad: bool = False) -> None:
             await window.released.wait()
             return listener.end()
 
+    async def calibrate() -> None:
+        """Measure Skelly's bleed at the mic and the user's voice; set barge_threshold between them."""
+        from skelly_mac import CONFIG_FILE, save_config
+
+        levels: list[float] = []
+        tap = lambda: levels.append(listener.level)
+        async with session.lock:
+            await session.ensure_connected()
+            listener.mute()
+            window.set_state("talking", heard="Calibrating: measuring how loud Skelly is at the microphone…", said="")
+            job = StreamJob("Testing, testing. Can you hear my bones from over there? One, two, three, four, five.", config)
+            await job.started
+            player = asyncio.create_task(asyncio.to_thread(job.play, session.device))
+            while not player.done():
+                tap()
+                await asyncio.sleep(0.03)
+            await job.generation
+            bleed = float(np.percentile(levels, 95)) if levels else 0.0
+            levels.clear()
+            window.set_state("listening", heard=f"Skelly bleed: {bleed:.4f}. Now talk to Skelly from where a kid would stand…", said="")
+            end = time.monotonic() + 4
+            while time.monotonic() < end:
+                tap()
+                await asyncio.sleep(0.03)
+            speech = float(np.percentile(levels, 85)) if levels else 0.0
+            listener.unmute()
+        threshold = pick_barge_threshold(bleed, speech)
+        margin = 20 * np.log10(speech / bleed) if bleed and speech else 0.0
+        config["barge_threshold"] = threshold
+        save_config(config)
+        verdict = (f"Barge-in ON at {threshold:.4f}" if threshold else "Barge-in OFF: too little margin (move the mic nearer the kids or further from Skelly)")
+        print(f"calibration: bleed {bleed:.4f} you {speech:.4f} margin {margin:.0f} dB -> {verdict}", flush=True)
+        window.set_state("idle", heard=f"Bleed {bleed:.4f}, you {speech:.4f}, margin {margin:.0f} dB.", said=verdict)
+        await asyncio.sleep(4)
+
     async def speak_streamed(heard: str) -> dict[str, float]:
         """Render sentence N+1 while sentence N plays, so there is no dead air between them."""
         queue: asyncio.Queue[asyncio.Task | None] = asyncio.Queue()
         timing = {"llm": 0.0, "tts": 0.0}
         start = time.monotonic()
+        barge = (window is not None and window.handsfree or vad) and config.get("barge_threshold")
+        if barge:
+            listener.arm_barge_in(float(config["barge_threshold"]))
 
         async def produce() -> None:
             try:
@@ -325,9 +401,14 @@ async def run(session: object, vad: bool = False) -> None:
             await producer
 
         consumer = asyncio.create_task(consume())
-        interrupt = asyncio.ensure_future(window.pressed.wait()) if window else asyncio.Future()
+        triggers = [listener.barge_in.wait()] if barge else []
+        if window:
+            triggers.append(window.pressed.wait())
+        interrupt = asyncio.ensure_future(first(*triggers)) if triggers else asyncio.Future()
         done, _ = await asyncio.wait({consumer, interrupt}, return_when=asyncio.FIRST_COMPLETED)
-        if interrupt in done:  # SPACE while he talks: cut him off and listen
+        if barge:
+            listener.disarm_barge_in()
+        if interrupt in done:  # SPACE, or a kid's voice over his bleed: cut him off and listen
             print("skelly: (interrupted)", flush=True)
             producer.cancel()
             consumer.cancel()
@@ -383,7 +464,7 @@ async def run(session: object, vad: bool = False) -> None:
                     window.set_state("idle", said=f"Error: {exc}"[:300])
                     await asyncio.sleep(3)
             finally:
-                if not (window and window.down):  # an interrupting kid is already talking: no settle delay
+                if not (window and window.down) and listener.muted:  # an interrupting kid is already talking
                     await asyncio.sleep(0.5)  # let the Skelly's last echo die before the mic re-arms
                 listener.unmute()
     if pump:

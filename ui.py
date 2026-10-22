@@ -27,6 +27,7 @@ class TalkWindow:
         self.said = tk.Label(self.root, text="", font=("Helvetica", 22, "italic"), wraplength=840, justify="center")
         self.said.pack(fill="x", padx=30, pady=(10, 40))
         self.on_clear = lambda: None  # talk.run points this at Brain.reset
+        self.on_calibrate = lambda: None  # talk.run: measure bleed vs voice for hands-free barge-in
         self.level_source = lambda: (0.0, 1.0)  # talk.run: () -> (mic rms, speech threshold)
         self.handsfree = False
         self.mode_changed = asyncio.Event()
@@ -48,6 +49,9 @@ class TalkWindow:
         self.clear_button = tk.Button(bottom, text="Clear memory", font=("Helvetica", 14), takefocus=0,
                                       highlightthickness=0, command=self._clear)
         self.clear_button.pack(side="right")
+        self.calibrate_button = tk.Button(bottom, text="Calibrate", font=("Helvetica", 14), takefocus=0,
+                                          highlightthickness=0, command=self._calibrate)
+        self.calibrate_button.pack(side="right", padx=16)
         self.down = False
         self.pending_release: str | None = None
         self.pressed = asyncio.Event()
@@ -109,6 +113,10 @@ class TalkWindow:
         self.meter.create_rectangle(0, 0, 260, 14, fill="#000000", outline="")
         self.meter.create_rectangle(0, 0, int(260 * fill), 14, fill="#3ddc84" if level >= threshold else "#5a5a7a", outline="")
         self.meter.create_line(104, 0, 104, 14, fill="#ffffff")
+
+    def _calibrate(self) -> None:
+        self.on_calibrate()
+        self.root.focus_force()
 
     def _clear(self) -> None:
         self.on_clear()

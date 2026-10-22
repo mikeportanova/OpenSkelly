@@ -152,3 +152,8 @@ starts when the mic level crosses `vad_threshold` (the meter at the bottom shows
 the level against it; `talk --listen-test` prints it) and ends after
 `vad_silence` seconds of quiet; short fragments and Whisper's noise
 hallucinations are ignored. `talk --vad` starts hands-free without the window.
+Hands-free can let a kid interrupt Skelly mid-sentence: press **Calibrate** once
+with the mic in its final spot — it measures how loud Skelly is at the mic, then
+asks you to talk from where a kid would stand, and stores `barge_threshold`
+between the two (off when the margin is under 6 dB; move the mic closer to the
+kids or further from Skelly). In push-to-talk, SPACE interrupts him.
