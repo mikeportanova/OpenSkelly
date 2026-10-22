@@ -197,7 +197,7 @@ class Brain:
 
 async def run(session: object, vad: bool = False) -> None:
     """Conversation loop on a skelly_mac.Session: push-to-talk window by default, energy VAD with vad=True."""
-    from skelly_mac import FILLERS, FILLER_AFTER, StreamJob, filler_pcm, play_pcm, render, synthesize
+    from skelly_mac import FILLERS, FILLER_AFTER, MODELS, StreamJob, filler_pcm, play_pcm, render, synthesize
 
     config = session.config
     window = None if vad else __import__("ui").TalkWindow()
@@ -224,6 +224,16 @@ async def run(session: object, vad: bool = False) -> None:
     if window:
         window.on_clear = brain.reset
         window.level_source = lambda: (listener.level, listener.segmenter.threshold)
+        models = {**MODELS}
+        if brain.model not in models.values():
+            models[brain.model] = brain.model
+        window.set_models(models, brain.model)
+
+        def switch_model(model_id: str) -> None:
+            brain.model = model_id
+            print(f"model: {model_id}", flush=True)
+
+        window.on_model = switch_model
     pump = asyncio.create_task(window.pump()) if window else None
 
     async def first(*coros: object) -> int:

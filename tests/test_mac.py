@@ -180,3 +180,11 @@ class StreamJobTests(unittest.TestCase):
         self.assertTrue(all(len(f) % 4 == 0 for f in frames))
         seconds = sum(len(f) for f in frames) / 4 / skelly_mac.RATE
         self.assertAlmostEqual(seconds, 1 + skelly_mac.TAIL_SECONDS, delta=0.05)
+
+
+class FillerTests(unittest.TestCase):
+    def test_filler_has_no_silence_pad(self):
+        rate = 24000
+        tone = (0.5 * np.sin(2 * np.pi * 440 * np.arange(rate) / rate)).astype(np.float32)
+        pcm = skelly_mac.decode_audio(tone.tobytes(), None, rate, pad=False)
+        self.assertAlmostEqual(len(pcm) / skelly_mac.RATE, 1.0, delta=0.05)

@@ -38,6 +38,12 @@ class TalkWindow:
         self.mode_button = tk.Button(bottom, text="Hands-free: off", font=("Helvetica", 14), takefocus=0,
                                      highlightthickness=0, command=self._toggle_mode)
         self.mode_button.pack(side="left", padx=16)
+        self.on_model = lambda model_id: None  # talk.run: switch the chat model live
+        self.models: dict[str, str] = {}
+        self.model_var = tk.StringVar(value="")
+        self.model_menu = tk.OptionMenu(bottom, self.model_var, "")
+        self.model_menu.configure(takefocus=0, highlightthickness=0, font=("Helvetica", 14))
+        self.model_menu.pack(side="left", padx=16)
         # takefocus=0 so the button never owns the keyboard: SPACE must stay push-to-talk, not "press button"
         self.clear_button = tk.Button(bottom, text="Clear memory", font=("Helvetica", 14), takefocus=0,
                                       highlightthickness=0, command=self._clear)
@@ -75,6 +81,20 @@ class TalkWindow:
             self.down = False
             self.pressed.clear()
             self.released.set()
+
+    def set_models(self, models: dict[str, str], current_id: str) -> None:
+        """Offer the chat models by label; selecting one calls on_model with its id."""
+        self.models = models
+        menu = self.model_menu["menu"]
+        menu.delete(0, "end")
+        for label in models:
+            menu.add_command(label=label, command=lambda l=label: self._choose_model(l))
+        self.model_var.set(next((l for l, m in models.items() if m == current_id), next(iter(models))))
+
+    def _choose_model(self, label: str) -> None:
+        self.model_var.set(label)
+        self.on_model(self.models[label])
+        self.root.focus_force()
 
     def _toggle_mode(self) -> None:
         self.handsfree = not self.handsfree

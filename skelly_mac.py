@@ -202,7 +202,7 @@ async def disconnect_live(skelly: Skelly, live_mac: str) -> None:
         run("blueutil", "--disconnect", live_mac, timeout=10)
 
 
-def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None = None) -> np.ndarray:
+def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None = None, pad: bool = True) -> np.ndarray:
     """ffmpeg -> 44.1 kHz stereo int16; `source` is a file, or raw mono float32 PCM at `in_rate`."""
     args = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
     if isinstance(source, bytes):
@@ -211,7 +211,7 @@ def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None 
         args += ["-i", str(source)]
     # resample first so a chain written for 44.1 kHz (asetrate=44100*0.9) means the same for 24 kHz TTS output;
     # pad the end so the Bluetooth buffer flushes the last word and the echo tail instead of clipping it
-    args += ["-af", f"aresample={RATE}" + (f",{filters}" if filters else "") + f",apad=pad_dur={TAIL_SECONDS}"]
+    args += ["-af", f"aresample={RATE}" + (f",{filters}" if filters else "") + (f",apad=pad_dur={TAIL_SECONDS}" if pad else "")]
     args += ["-f", "s16le", "-ar", str(RATE), "-ac", "2", "-"]
     raw = subprocess.run(args, check=True, capture_output=True, timeout=120,
                          input=source if isinstance(source, bytes) else None).stdout
@@ -225,13 +225,10 @@ def play_pcm(pcm: np.ndarray, device: int) -> None:
 _tts_model: object = None
 _tts_executor = ThreadPoolExecutor(max_workers=1)  # MLX generation is not reentrant: one sentence at a time
 STREAM_RATE = 24000  # mlx TTS output
-FILLER_AFTER = 0.7  # seconds of silence after the kid stops before a filler covers the wait
+FILLER_AFTER = 1.2  # seconds of silence after the kid stops before a filler covers the wait
 FILLER_DIR = CONFIG_FILE.parent / "fillers"
-FILLERS = [
-    "Hmmmm.", "Let me think, little one.", "Ahh, interesting.", "Well now.", "Oh ho ho.", "Hmm, yes, yes.",
-    "Let me rattle my bones about that.", "Ooooh.", "One moment, mortal.", "Ha! Very well.", "My, my.",
-    "Hmm. Curious.", "Patience, child.", "Let me consult my skull.",
-]
+FILLERS = ["Hmmmm.", "Well now.", "Ooooh.", "My, my.", "Ahh.", "Oh ho.", "Hmm, yes.", "Ha!", "Let me see.", "Mmm."]
+MODELS = {"Haiku (fastest)": "claude-haiku-5-5", "Sonnet": "claude-sonnet-5-5", "Opus (wittiest)": "claude-opus-5-5"}
 
 
 def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
@@ -337,7 +334,7 @@ def filler_pcm(config: dict, text: str) -> np.ndarray:
     if path.exists():
         return np.load(path)
     source, rate = synthesize(text, config)
-    pcm = decode_audio(source, config["voice_fx"] or None, rate)
+    pcm = decode_audio(source, config["voice_fx"] or None, rate, pad=False)  # the real answer follows at once
     FILLER_DIR.mkdir(parents=True, exist_ok=True)
     np.save(path, pcm)
     return pcm
