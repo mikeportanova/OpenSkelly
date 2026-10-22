@@ -183,8 +183,12 @@ def transcribe(audio: np.ndarray, model: str) -> str:
 
 class Brain:
     def __init__(self, model: str = MODEL, persona: str = PERSONA) -> None:
+        import os
+
         from anthropic import AsyncAnthropic
 
+        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+            raise RuntimeError("ANTHROPIC_API_KEY is not set in this terminal; export it and run talk again")
         self.client = AsyncAnthropic()
         self.model = model
         self.persona = persona

@@ -486,7 +486,16 @@ async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
 
             talking = asyncio.create_task(talk.run(session, vad))
             tasks.append(talking)
-            talking.add_done_callback(lambda _t: stop.set())
+
+            def talk_ended(task: asyncio.Task) -> None:
+                if not task.cancelled() and task.exception():
+                    import traceback
+
+                    print("talk loop crashed:", flush=True)
+                    traceback.print_exception(task.exception())
+                stop.set()
+
+            talking.add_done_callback(talk_ended)
         else:
             await asyncio.to_thread(synthesize, "Boo.", config)  # load the voice model before the first `say`
             print("Skelly server is running; say/play/lights/eyes now go through it. Ctrl-C or `stop` to end.", flush=True)
