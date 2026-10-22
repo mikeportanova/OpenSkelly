@@ -25,6 +25,11 @@ class TalkWindow:
         self.heard.pack(fill="x", padx=30)
         self.said = tk.Label(self.root, text="", font=("Helvetica", 22, "italic"), wraplength=840, justify="center")
         self.said.pack(fill="x", padx=30, pady=(10, 40))
+        self.on_clear = lambda: None  # talk.run points this at Brain.reset
+        # takefocus=0 so the button never owns the keyboard: SPACE must stay push-to-talk, not "press button"
+        self.clear_button = tk.Button(self.root, text="Clear memory", font=("Helvetica", 14), takefocus=0,
+                                      highlightthickness=0, command=self._clear)
+        self.clear_button.pack(side="bottom", anchor="e", padx=20, pady=16)
         self.down = False
         self.pending_release: str | None = None
         self.pressed = asyncio.Event()
@@ -58,6 +63,12 @@ class TalkWindow:
             self.down = False
             self.pressed.clear()
             self.released.set()
+
+    def _clear(self) -> None:
+        self.on_clear()
+        self.heard.configure(text="Memory cleared. Skelly forgot everything.")
+        self.said.configure(text="")
+        self.root.focus_force()
 
     def set_state(self, state: str, heard: str | None = None, said: str | None = None) -> None:
         text, bg, fg = STATES[state]

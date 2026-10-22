@@ -122,6 +122,9 @@ class Brain:
         self.model = model
         self.messages: list[dict] = []
 
+    def reset(self) -> None:
+        self.messages.clear()
+
     async def reply(self, text: str) -> AsyncIterator[str]:
         """Stream the answer back one sentence at a time."""
         self.messages.append({"role": "user", "content": text})
@@ -163,6 +166,8 @@ async def run(session: object, vad: bool = False) -> None:
     brain = Brain(config.get("model", MODEL))
     listener = Listener(config["vad_threshold"], config.get("mic_device"))
     session.listener = listener
+    if window:
+        window.on_clear = brain.reset
     pump = asyncio.create_task(window.pump()) if window else None
 
     async def hear() -> np.ndarray | None:

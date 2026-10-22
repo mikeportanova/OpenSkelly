@@ -74,6 +74,14 @@ class PushToTalkTests(unittest.TestCase):
         asyncio.run(go())
 
 
+class MemoryTests(unittest.TestCase):
+    def test_reset_forgets_everything(self):
+        brain = talk.Brain.__new__(talk.Brain)
+        brain.messages = [{"role": "user", "content": "I am Olivia"}, {"role": "assistant", "content": "Hello Olivia"}]
+        brain.reset()
+        self.assertEqual(brain.messages, [])
+
+
 class VoiceFxTests(unittest.TestCase):
     def dominant_hz(self, pcm: np.ndarray) -> float:
         mono = pcm[:, 0].astype(np.float64)
