@@ -222,6 +222,11 @@ def play_pcm(pcm: np.ndarray, device: int) -> None:
     sd.play(pcm, RATE, device=device, blocking=True)
 
 
+def stop_playback() -> None:
+    """Abort any sd.play in progress (fillers, non-streamed engines)."""
+    sd.stop()
+
+
 _tts_model: object = None
 _tts_executor = ThreadPoolExecutor(max_workers=1)  # MLX generation is not reentrant: one sentence at a time
 STREAM_RATE = 24000  # mlx TTS output
@@ -296,25 +301,39 @@ class StreamJob:
         self.proc = subprocess.Popen(fx_args(config["voice_fx"] or None, STREAM_RATE), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.started = asyncio.get_running_loop().create_future()  # resolved when the first chunk exists
+        self.stopped = False
         self.generation = asyncio.get_running_loop().run_in_executor(_tts_executor, self._generate)
+
+    def stop(self) -> None:
+        """Interrupt: stop playing and generating this sentence."""
+        self.stopped = True
+        self.proc.kill()
 
     def _generate(self) -> None:
         loop = self.started.get_loop()
         try:
             for chunk in synthesize_stream(self.text, self.config):
+                if self.stopped:
+                    break
                 self.proc.stdin.write(chunk)
                 if not self.started.done():
                     loop.call_soon_threadsafe(lambda: self.started.done() or self.started.set_result(True))
+        except (BrokenPipeError, ValueError):
+            if not self.stopped:
+                raise
         except Exception as exc:
             loop.call_soon_threadsafe(lambda: self.started.done() or self.started.set_exception(exc))
             raise
         finally:
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass
 
     def frames(self, frame_bytes: int = RATE * 4 // 10) -> Iterator[bytes]:
         """Processed stereo int16 PCM in ~100 ms pieces, frame-aligned."""
         rest = b""
-        while chunk := self.proc.stdout.read(frame_bytes):
+        while not self.stopped and (chunk := self.proc.stdout.read(frame_bytes)):
             data = rest + chunk
             cut = len(data) // 4 * 4
             yield data[:cut]
@@ -324,6 +343,9 @@ class StreamJob:
     def play(self, device: int) -> None:
         with sd.RawOutputStream(samplerate=RATE, channels=2, dtype="int16", device=device) as out:
             for frame in self.frames():
+                if self.stopped:
+                    out.abort()
+                    break
                 out.write(frame)
 
 

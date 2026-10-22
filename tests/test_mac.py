@@ -188,3 +188,62 @@ class FillerTests(unittest.TestCase):
         tone = (0.5 * np.sin(2 * np.pi * 440 * np.arange(rate) / rate)).astype(np.float32)
         pcm = skelly_mac.decode_audio(tone.tobytes(), None, rate, pad=False)
         self.assertAlmostEqual(len(pcm) / skelly_mac.RATE, 1.0, delta=0.05)
+
+
+class InterruptTests(unittest.TestCase):
+    def test_interrupted_reply_keeps_what_was_said(self):
+        import asyncio
+
+        async def go():
+            brain = talk.Brain.__new__(talk.Brain)
+            brain.messages = []
+
+            async def fake_stream(_buffer):
+                yield "Boo!"
+                await asyncio.sleep(10)
+                yield "never"
+
+            brain._stream = fake_stream
+            heard = []
+
+            async def consume():
+                async for sentence in brain.reply("hi"):
+                    heard.append(sentence)
+
+            task = asyncio.create_task(consume())
+            await asyncio.sleep(0.05)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            return heard, brain.messages
+
+        heard, messages = asyncio.run(go())
+        self.assertEqual(heard, ["Boo!"])
+        self.assertEqual(messages, [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Boo!"}])
+
+    def test_stream_job_stop_ends_generation_and_frames(self):
+        import asyncio, time
+
+        def slow_chunks(text, config):
+            tone = (0.3 * np.sin(2 * np.pi * 440 * np.arange(12000) / 24000)).astype(np.float32).tobytes()
+            for _ in range(40):
+                yield tone
+                time.sleep(0.05)
+
+        original = skelly_mac.synthesize_stream
+        skelly_mac.synthesize_stream = slow_chunks
+        try:
+            async def go():
+                job = skelly_mac.StreamJob("x", {"voice_fx": None, "tts": "clone"})
+                await asyncio.wait_for(job.started, 10)
+                reader = asyncio.to_thread(lambda: sum(len(f) for f in job.frames()))
+                await asyncio.sleep(0.2)
+                job.stop()
+                got = await asyncio.wait_for(reader, 5)
+                await asyncio.wait_for(job.generation, 5)  # must not raise after a stop
+                return got
+
+            got = asyncio.run(go())
+        finally:
+            skelly_mac.synthesize_stream = original
+        self.assertLess(got / 4 / skelly_mac.RATE, 10)  # far less than the 20 s it would have produced
