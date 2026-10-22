@@ -131,10 +131,12 @@ the session. Without a server running those commands connect on their own.
 .venv/bin/python skelly_mac.py stop
 ```
 
-The voice is picked by `tts` in `mac.json`: `qwen` (default; Qwen3-TTS
-VoiceDesign, the voice is whatever `voice_instruct` describes), `kokoro` (fast
-neural voice named by `voice`, e.g. `am_michael`) or `say` (macOS voice named by
-`voice`). `voice_fx` is an ffmpeg filter chain applied before the jaw; prepend
+The voice is picked by `tts` in `mac.json`: `clone` (default; every line is
+cloned from one reference clip so Skelly is the same skeleton all night — render
+it with `skelly_mac.py voice design --seed N`, which uses Qwen3-TTS VoiceDesign
+and `voice_instruct`; try a few seeds and keep the one you like), `qwen`
+(VoiceDesign directly, a new voice every line), `kokoro` (fast neural voice named
+by `voice`, e.g. `am_michael`) or `say` (macOS voice named by `voice`). `voice_fx` is an ffmpeg filter chain applied before the jaw; prepend
 `asetrate=44100*0.8,aresample=44100,` to pitch a voice down. Models download on
 first use (Qwen is about 1 GB). `talk --vad` listens hands-free instead of the
 window; tune `vad_threshold` with `talk --listen-test`.

@@ -35,14 +35,22 @@ LIVE_NAME = "12ft Skelly(Live)"
 CONFIG_FILE = Path.home() / ".config" / "openskelly" / "mac.json"
 CONTROL_SOCKET = Path(__file__).resolve().parent / ".skelly-live" / "mac.sock"
 RATE = 44100
-TTS_MODELS = {"kokoro": "mlx-community/Kokoro-82M-bf16", "qwen": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit"}
+TTS_MODELS = {
+    "kokoro": "mlx-community/Kokoro-82M-bf16",
+    "qwen": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit",
+    "clone": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-4bit",
+}
+VOICE_REF = CONFIG_FILE.parent / "voice_ref.wav"
+REF_TEXT = "Well, well, well. Another little visitor. Come closer, child. I do not bite. I have no lips."
 DEFAULTS = {
-    "tts": "qwen",  # say | kokoro | qwen (VoiceDesign: describes the voice in `voice_instruct`)
+    # say | kokoro | qwen (VoiceDesign rolls a new voice per line) | clone (every line cloned from `voice design`'s clip)
+    "tts": "clone",
     "voice": "Daniel",  # `say -v` voice, or a Kokoro voice such as am_michael
     "voice_instruct": "A very deep, slow, rumbling male voice with a dry, gravelly rasp and a sinister chuckle; an "
                       "ancient giant skeleton, theatrical and menacing like a horror movie villain, drawn-out words, "
                       "cavernous and hollow.",
-    "voice_seed": 42,  # VoiceDesign samples a new voice per call; a fixed seed keeps the same skeleton every sentence
+    "voice_seed": 42,  # VoiceDesign seed used by `voice design` to render the reference clip
+    "voice_ref_text": REF_TEXT,
     # ffmpeg chain before the jaw: slight pitch-down, cavern echo, loudness for the mouth threshold
     "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,loudnorm=I=-10:TP=-1",
     "whisper_model": "mlx-community/whisper-small-mlx",
@@ -205,6 +213,10 @@ def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
         _tts_model = load_model(TTS_MODELS[config["tts"]])
     if config["tts"] == "kokoro":
         results = _tts_model.generate(text, voice=config["voice"], speed=0.85, lang_code="a")
+    elif config["tts"] == "clone":
+        if not VOICE_REF.exists():
+            raise RuntimeError(f"no reference voice at {VOICE_REF}; run: skelly_mac.py voice design")
+        results = _tts_model.generate(text, ref_audio=str(VOICE_REF), ref_text=config["voice_ref_text"], lang_code="en")
     else:
         import mlx.core as mx
 
@@ -388,6 +400,24 @@ async def cmd_configure(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voice_design(args: argparse.Namespace) -> int:
+    """Render the reference clip with VoiceDesign (seeded) that `clone` mode copies for every line."""
+    config = load_config()
+    if args.seed is not None:
+        config["voice_seed"] = args.seed
+    if args.instruct:
+        config["voice_instruct"] = args.instruct
+    design = {**config, "tts": "qwen"}
+    print(f"Rendering reference voice (seed {design['voice_seed']})…", flush=True)
+    pcm, rate = synthesize(config["voice_ref_text"], design)
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(rate), "-ac", "1",
+                    "-i", "-", str(VOICE_REF)], input=pcm, check=True)
+    config.update({"tts": "clone", "voice_seed": design["voice_seed"], "voice_instruct": design["voice_instruct"]})
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"Saved {VOICE_REF}; tts=clone. Restart serve/talk to use it.")
+    return 0
+
+
 async def cmd_frames(frames: list[str]) -> int:
     if send_to_server({"cmd": "frames", "frames": frames}):
         return 0
@@ -462,6 +492,11 @@ def main() -> int:
     play = subs.add_parser("play", help="play an audio file through Skelly with jaw animation")
     play.add_argument("audio", type=Path)
     say = subs.add_parser("say", help="speak a line through Skelly")
+    voice = subs.add_parser("voice", help="manage the cloned skeleton voice")
+    voice_subs = voice.add_subparsers(dest="voice_action", required=True)
+    design = voice_subs.add_parser("design", help="render the reference clip that clone mode copies")
+    design.add_argument("--seed", type=int, help="VoiceDesign seed; different seeds give different skeletons")
+    design.add_argument("--instruct", help="voice description for VoiceDesign")
     say.add_argument("text")
     subs.add_parser("serve", help="hold the Live connection; say/play/lights/eyes go through it until `stop`")
     subs.add_parser("stop", help="stop a running serve/talk and disconnect")
@@ -489,6 +524,8 @@ def main() -> int:
             return asyncio.run(cmd_play(args.audio))
         if args.action == "say":
             return asyncio.run(cmd_say(args.text))
+        if args.action == "voice":
+            return cmd_voice_design(args)
         if args.action == "talk":
             return asyncio.run(cmd_talk(args))
         if args.action == "serve":
