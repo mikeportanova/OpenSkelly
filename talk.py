@@ -14,13 +14,13 @@ import sounddevice as sd
 MIC_RATE = 16000
 BLOCK = 480  # 30 ms
 MODEL = "claude-opus-5-5"
-SYSTEM = (
-    "You are Skelly, a friendly 12-foot-tall skeleton standing in a front yard on Halloween night, "
-    "chatting with trick-or-treaters, mostly young kids. Be playful and a little spooky, never actually "
-    "frightening, mean, or gross. Everything you say is spoken aloud through your jaw, so answer in one "
-    "or two short sentences a child can follow: no lists, no emoji, no stage directions. Ask a question "
-    "back now and then. If a kid tells you their name or costume, use it. If asked something you should "
-    "not answer, deflect with a bone pun."
+PERSONA = (
+    "You are Skelly, a 12-foot-tall skeleton standing in a front yard on Halloween night, chatting with "
+    "trick-or-treaters, mostly young kids. Be playful and a little spooky, never actually frightening, mean, "
+    "or gross. Everything you say is spoken aloud through your jaw, so answer in one or two short sentences "
+    "a child can follow: no lists, no emoji, no stage directions. Respond to what the kid actually said and "
+    "stop there; do not tack a question onto the end of your answer. If a kid tells you their name or "
+    "costume, use it. If asked something you should not answer, deflect with a bone pun."
 )
 
 
@@ -115,11 +115,12 @@ def transcribe(audio: np.ndarray, model: str) -> str:
 
 
 class Brain:
-    def __init__(self, model: str = MODEL) -> None:
+    def __init__(self, model: str = MODEL, persona: str = PERSONA) -> None:
         from anthropic import AsyncAnthropic
 
         self.client = AsyncAnthropic()
         self.model = model
+        self.persona = persona
         self.messages: list[dict] = []
 
     def reset(self) -> None:
@@ -132,7 +133,7 @@ class Brain:
         async with self.client.beta.messages.stream(
             model=self.model,
             max_tokens=300,
-            system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": self.persona, "cache_control": {"type": "ephemeral"}}],
             messages=self.messages,
             output_config={"effort": "low"},
             betas=["server-side-fallback-2026-07-01"],
@@ -163,7 +164,7 @@ async def run(session: object, vad: bool = False) -> None:
     print("Loading speech models (first run downloads them)…", flush=True)
     await asyncio.to_thread(transcribe, np.zeros(MIC_RATE, dtype=np.float32), config["whisper_model"])
     await asyncio.to_thread(synthesize, "Boo.", config)
-    brain = Brain(config.get("model", MODEL))
+    brain = Brain(config.get("model", MODEL), config.get("persona") or PERSONA)
     listener = Listener(config["vad_threshold"], config.get("mic_device"))
     session.listener = listener
     if window:

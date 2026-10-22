@@ -54,6 +54,7 @@ DEFAULTS = {
     "voice_ref_text": REF_TEXT,
     # ffmpeg chain before the jaw: slight pitch-down, cavern echo, loudness for the mouth threshold
     "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,loudnorm=I=-10:TP=-1",
+    "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
     "whisper_model": "mlx-community/whisper-small-mlx",
     "vad_threshold": 0.02,
 }
