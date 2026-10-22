@@ -1,7 +1,10 @@
 import argparse
+import sys
 import runpy
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
 
 
 MODULE = runpy.run_path(str(Path(__file__).parents[1] / "openskelly"), run_name="openskelly_test")

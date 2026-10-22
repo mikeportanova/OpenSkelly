@@ -1,0 +1,5 @@
+bleak
+sounddevice
+numpy
+mlx-whisper
+anthropic

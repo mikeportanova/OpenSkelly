@@ -19,14 +19,9 @@ from pathlib import Path
 
 GATT_HANDLE = "0x0082"
 
-COMMANDS = {
-    "stop_file": "aac60000000000000000ed",
-    "enable_live_radio": "aafd0100000000000000d1",
-    "select_bluetooth": "aafe010000000000000024",
-    "start_live": "aafc010000000000000075",
-    "stop_live": "aafc000000000000000036",
-    "volume_100": "aafa640000000000000031",
-}
+from protocol import (
+    COMMANDS, crc8, eye_frame, light_brightness_frame, light_channel, light_color_frame, protocol_frame,
+)
 
 ROOT = Path(__file__).resolve().parent
 RUNTIME = ROOT / ".skelly-live"
@@ -169,34 +164,6 @@ def connect_gatt(ble_mac: str) -> GattSession:
     raise RuntimeError(f"could not connect to Skelly BLE control: {last_error}")
 
 
-def crc8(data: bytes) -> int:
-    """DecorPro's reflected CRC-8 (polynomial 0x8C)."""
-    crc = 0
-    for byte in data:
-        crc ^= byte
-        for _ in range(8):
-            crc = (crc >> 1) ^ 0x8C if crc & 1 else crc >> 1
-    return crc
-
-
-def light_channel(value: str) -> int:
-    aliases = {"chest": 0, "all": 0xFF}
-    if value.lower() in aliases:
-        return aliases[value.lower()]
-    try:
-        channel = int(value)
-    except ValueError as exc:
-        raise argparse.ArgumentTypeError("channel must be chest, all, or 0-5") from exc
-    if not 0 <= channel <= 5:
-        raise argparse.ArgumentTypeError("channel must be chest, all, or 0-5")
-    return channel
-
-
-def protocol_frame(opcode: int, payload: bytes) -> str:
-    frame = bytes((0xAA, opcode)) + payload
-    return (frame + bytes((crc8(frame),))).hex()
-
-
 def send_live_frames(frames: list[str]) -> None:
     deadline = time.monotonic() + 8
     while True:
@@ -220,9 +187,9 @@ def send_live_frames(frames: list[str]) -> None:
 def set_light(channel: int, rgb: str | None, brightness: int | None) -> int:
     frames = []
     if rgb is not None:
-        frames.append(protocol_frame(0xF4, bytes((channel,)) + bytes.fromhex(rgb) + b"\x00\xff\xff\xff\xff\x00"))
+        frames.append(light_color_frame(channel, rgb))
     if brightness is not None:
-        frames.append(protocol_frame(0xF3, bytes((channel, brightness)) + b"\xff\xff\xff\xff\x00\x00"))
+        frames.append(light_brightness_frame(channel, brightness))
     gatt: GattSession | None = None
     try:
         if current_pid():
@@ -242,7 +209,7 @@ def set_light(channel: int, rgb: str | None, brightness: int | None) -> int:
 
 
 def set_eyes(pattern: int) -> int:
-    frame = protocol_frame(0xF9, bytes((pattern, 0)) + b"\xff\xff\xff\xff\x00")
+    frame = eye_frame(pattern)
     gatt: GattSession | None = None
     try:
         if current_pid():
@@ -407,7 +374,7 @@ def serve_control(listener: socket.socket, gatt: GattSession) -> None:
             request = json.loads(client.recv(4096))
             frames = request.get("frames")
             if not isinstance(frames, list) or not frames or not all(
-                isinstance(frame, str) and re.fullmatch(r"[0-9a-f]{22,26}", frame)
+                isinstance(frame, str) and re.fullmatch(r"[0-9a-f]{20,26}", frame)
                 for frame in frames
             ):
                 raise ValueError("invalid control request")

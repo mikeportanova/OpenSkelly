@@ -91,10 +91,33 @@ Runtime state and logs are stored under `.skelly-live/`.
 Run the offline protocol and routing checks with:
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v   # or .venv/bin/python on macOS
 ```
 
 See [PROTOCOL.md](PROTOCOL.md) for reverse-engineered protocol details.
 
 OpenSkelly is independent and is not affiliated with or endorsed by Home Depot
 or the DecorPro application developers.
+
+## macOS (`skelly_mac.py`)
+
+The same protocol over CoreBluetooth (bleak) and A2DP, plus a two-way talk mode:
+the Mac microphone → Whisper (on-device, Apple Silicon) → Claude → macOS `say`
+through Skelly's jaw.
+
+```bash
+brew install blueutil ffmpeg
+python3 -m venv .venv && .venv/bin/pip install -r requirements-mac.txt
+export ANTHROPIC_API_KEY=...        # talk mode only
+.venv/bin/python skelly_mac.py configure        # Skelly powered on and in range
+.venv/bin/python skelly_mac.py say "Happy Halloween!"
+.venv/bin/python skelly_mac.py talk
+```
+
+`configure` finds the BLE endpoint, switches on Skelly's classic radio, pairs
+`12ft Skelly(Live)` (pass `--pin` if your unit asks for one) and writes
+`~/.config/openskelly/mac.json`. `lights`, `eyes` and `play` take the same
+arguments as the Linux CLI. Before the first `talk`, run
+`skelly_mac.py talk --listen-test` and set `vad_threshold` in `mac.json` just above
+the room's quiet level; `voice` picks any `say -v '?'` voice. macOS will ask for
+Bluetooth and Microphone permission for your terminal on first use.
