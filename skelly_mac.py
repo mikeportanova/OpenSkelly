@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ AE02 = "0000ae02-0000-1000-8000-00805f9b34fb"
 BLE_NAME = "12ft Skelly"
 LIVE_NAME = "12ft Skelly(Live)"
 CONFIG_FILE = Path.home() / ".config" / "openskelly" / "mac.json"
+CONTROL_SOCKET = Path(__file__).resolve().parent / ".skelly-live" / "mac.sock"
 RATE = 44100
 TTS_MODELS = {"kokoro": "mlx-community/Kokoro-82M-bf16", "qwen": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit"}
 DEFAULTS = {
@@ -220,7 +222,128 @@ async def speak(text: str, config: dict, device: int) -> None:
     await asyncio.to_thread(play_pcm, pcm, device)
 
 
-# ---------------------------------------------------------------- commands
+# ---------------------------------------------------------------- resident server
+
+
+class Session:
+    """One long-lived Live connection shared by the talk loop and socket commands."""
+
+    def __init__(self, config: dict) -> None:
+        self.config = config
+        self.skelly: Skelly | None = None
+        self.device = -1
+        self.lock = asyncio.Lock()  # whoever holds it owns the jaw
+        self.listener: object = None  # set by talk.run; muted while socket commands speak
+
+    async def ensure_connected(self) -> None:
+        if self.skelly and self.skelly.client.is_connected and bt_connected(self.config["live_mac"]):
+            return
+        if self.skelly:
+            await self.skelly.__aexit__()
+        print("Connecting to Skelly…", flush=True)
+        self.skelly = await Skelly(self.config["ble_address"]).__aenter__()
+        self.device = await connect_live(self.skelly, self.config["live_mac"])
+        await asyncio.sleep(1.5)  # let the connection chime finish
+        print("Skelly Live is up", flush=True)
+
+    async def close(self) -> None:
+        if self.skelly:
+            try:
+                await disconnect_live(self.skelly, self.config["live_mac"])
+            finally:
+                await self.skelly.__aexit__()
+                self.skelly = None
+
+    async def handle(self, request: dict) -> None:
+        async with self.lock:
+            await self.ensure_connected()
+            if self.listener:
+                self.listener.mute()
+            try:
+                if request["cmd"] == "say":
+                    await speak(request["text"], self.config, self.device)
+                elif request["cmd"] == "play":
+                    pcm = decode_audio(Path(request["path"]), "loudnorm=I=-10:TP=-1:LRA=11")
+                    await asyncio.to_thread(play_pcm, pcm, self.device)
+                elif request["cmd"] == "frames":
+                    for frame in request["frames"]:
+                        await self.skelly.write(frame)
+                else:
+                    raise ValueError(f"unknown command {request['cmd']!r}")
+            finally:
+                if self.listener:
+                    await asyncio.sleep(0.3)
+                    self.listener.unmute()
+
+
+async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
+    session = Session(config)
+    stop = asyncio.Event()
+
+    async def on_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            request = json.loads(await reader.readline())
+            if request.get("cmd") == "stop":
+                stop.set()
+            else:
+                await session.handle(request)
+            response = {"ok": True}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+        writer.write(json.dumps(response).encode() + b"\n")
+        await writer.drain()
+        writer.close()
+
+    async def keepalive() -> None:
+        while True:
+            await asyncio.sleep(3)
+            async with session.lock:
+                try:
+                    await session.ensure_connected()
+                except Exception as exc:
+                    print(f"reconnect failed: {exc}", flush=True)
+
+    CONTROL_SOCKET.parent.mkdir(exist_ok=True)
+    CONTROL_SOCKET.unlink(missing_ok=True)
+    server = await asyncio.start_unix_server(on_client, path=str(CONTROL_SOCKET))
+    tasks = [asyncio.create_task(keepalive())]
+    try:
+        await session.ensure_connected()
+        if talk_mode:
+            import talk
+
+            talking = asyncio.create_task(talk.run(session, vad))
+            tasks.append(talking)
+            talking.add_done_callback(lambda _t: stop.set())
+        else:
+            await asyncio.to_thread(synthesize, "Boo.", config)  # load the voice model before the first `say`
+            print("Skelly server is running; say/play/lights/eyes now go through it. Ctrl-C or `stop` to end.", flush=True)
+        await stop.wait()
+    finally:
+        for task in tasks:
+            task.cancel()
+        server.close()
+        CONTROL_SOCKET.unlink(missing_ok=True)
+        await session.close()
+    return 0
+
+
+def send_to_server(request: dict) -> bool:
+    """Forward a command to a running server; False when none is listening."""
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(str(CONTROL_SOCKET))
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False
+    with client:
+        client.sendall(json.dumps(request).encode() + b"\n")
+        response = json.loads(client.makefile().readline())
+    if not response.get("ok"):
+        raise RuntimeError(response.get("error", "server command failed"))
+    return True
+
+
+# ---------------------------------------------------------------- one-shot commands (fallback when no server runs)
 
 
 async def cmd_configure(args: argparse.Namespace) -> int:
@@ -260,6 +383,8 @@ async def cmd_configure(args: argparse.Namespace) -> int:
 
 
 async def cmd_frames(frames: list[str]) -> int:
+    if send_to_server({"cmd": "frames", "frames": frames}):
+        return 0
     async with Skelly(load_config()["ble_address"]) as skelly:
         for frame in frames:
             await skelly.write(frame)
@@ -267,6 +392,8 @@ async def cmd_frames(frames: list[str]) -> int:
 
 
 async def cmd_play(path: Path) -> int:
+    if send_to_server({"cmd": "play", "path": str(path.resolve())}):
+        return 0
     config = load_config()
     print("Preparing audio…", flush=True)
     pcm = decode_audio(path, "loudnorm=I=-10:TP=-1:LRA=11,adelay=2000|2000,apad=pad_dur=0.75")
@@ -280,6 +407,8 @@ async def cmd_play(path: Path) -> int:
 
 
 async def cmd_say(text: str) -> int:
+    if send_to_server({"cmd": "say", "text": text}):
+        return 0
     config = load_config()
     async with Skelly(config["ble_address"]) as skelly:
         device = await connect_live(skelly, config["live_mac"])
@@ -299,14 +428,7 @@ async def cmd_talk(args: argparse.Namespace) -> int:
         config["vad_threshold"] = args.threshold
     if args.listen_test:
         return talk.listen_test(config)
-    config = load_config()
-    async with Skelly(config["ble_address"]) as skelly:
-        device = await connect_live(skelly, config["live_mac"])
-        try:
-            await talk.run(config, device)
-        finally:
-            await disconnect_live(skelly, config["live_mac"])
-    return 0
+    return await serve(load_config(), talk_mode=True, vad=args.vad)
 
 
 def main() -> int:
@@ -335,7 +457,10 @@ def main() -> int:
     play.add_argument("audio", type=Path)
     say = subs.add_parser("say", help="speak a line through Skelly")
     say.add_argument("text")
-    talk = subs.add_parser("talk", help="two-way conversation: mic -> Whisper -> Claude -> Skelly")
+    subs.add_parser("serve", help="hold the Live connection; say/play/lights/eyes go through it until `stop`")
+    subs.add_parser("stop", help="stop a running serve/talk and disconnect")
+    talk = subs.add_parser("talk", help="serve + two-way conversation: mic -> Whisper -> Claude -> Skelly")
+    talk.add_argument("--vad", action="store_true", help="hands-free voice detection instead of the push-to-talk window")
     talk.add_argument("--threshold", type=float, help="VAD RMS threshold (see --listen-test)")
     talk.add_argument("--listen-test", action="store_true", help="print mic levels for 5 s and exit")
     args = parser.parse_args()
@@ -360,6 +485,11 @@ def main() -> int:
             return asyncio.run(cmd_say(args.text))
         if args.action == "talk":
             return asyncio.run(cmd_talk(args))
+        if args.action == "serve":
+            return asyncio.run(serve(load_config(), talk_mode=False))
+        if args.action == "stop":
+            print("stopped" if send_to_server({"cmd": "stop"}) else "no server running")
+            return 0
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

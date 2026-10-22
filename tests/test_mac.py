@@ -48,3 +48,27 @@ class ConfigTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PushToTalkTests(unittest.TestCase):
+    def test_begin_end_collects_blocks_and_drops_short_presses(self):
+        import asyncio
+
+        async def go():
+            listener = talk.Listener.__new__(talk.Listener)
+            listener.muted = False
+            listener.recording = None
+            listener.queue = asyncio.Queue()
+            listener.loop = asyncio.get_running_loop()
+            block = np.zeros((talk.BLOCK, 1), dtype=np.float32)
+            listener.begin()
+            for _ in range(3):
+                listener._callback(block, talk.BLOCK, None, None)
+            self.assertIsNone(listener.end())  # 90 ms is a bump, not a word
+            listener.begin()
+            for _ in range(20):
+                listener._callback(block, talk.BLOCK, None, None)
+            self.assertEqual(len(listener.end()), 20 * talk.BLOCK)
+            self.assertIsNone(listener.recording)
+
+        asyncio.run(go())

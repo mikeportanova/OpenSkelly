@@ -74,9 +74,21 @@ class Listener:
         self.stream = sd.InputStream(samplerate=MIC_RATE, channels=1, dtype="float32", blocksize=BLOCK,
                                      device=device, callback=self._callback)
 
+        self.recording: list[np.ndarray] | None = None
+
     def _callback(self, indata: np.ndarray, _frames: int, _time: object, _status: object) -> None:
-        if not self.muted:
+        if self.recording is not None:
+            self.recording.append(indata[:, 0].copy())
+        elif not self.muted:
             self.loop.call_soon_threadsafe(self.queue.put_nowait, indata[:, 0].copy())
+
+    def begin(self) -> None:
+        self.recording = []
+
+    def end(self) -> np.ndarray | None:
+        """Stop push-to-talk recording; None when it was too short to be a word."""
+        blocks, self.recording = self.recording or [], None
+        return np.concatenate(blocks) if len(blocks) * BLOCK >= MIC_RATE * 0.3 else None
 
     def mute(self) -> None:
         self.muted = True
@@ -139,34 +151,60 @@ class Brain:
         del self.messages[:-40]
 
 
-async def run(config: dict, device: int) -> None:
-    from skelly_mac import speak
+async def run(session: object, vad: bool = False) -> None:
+    """Conversation loop on a skelly_mac.Session: push-to-talk window by default, energy VAD with vad=True."""
+    from skelly_mac import speak, synthesize
 
-    from skelly_mac import synthesize
-
+    config = session.config
+    window = None if vad else __import__("ui").TalkWindow()
     print("Loading speech models (first run downloads them)…", flush=True)
     await asyncio.to_thread(transcribe, np.zeros(MIC_RATE, dtype=np.float32), config["whisper_model"])
     await asyncio.to_thread(synthesize, "Boo.", config)
     brain = Brain(config.get("model", MODEL))
     listener = Listener(config["vad_threshold"], config.get("mic_device"))
+    session.listener = listener
+    pump = asyncio.create_task(window.pump()) if window else None
+
+    async def hear() -> np.ndarray | None:
+        if window is None:
+            return await listener.next_utterance()
+        window.set_state("idle")
+        await window.pressed.wait()
+        listener.begin()
+        window.set_state("listening")
+        await window.released.wait()
+        return listener.end()
+
     with listener.stream:
         print("Skelly is listening. Ctrl-C to stop.", flush=True)
-        while True:
-            utterance = await listener.next_utterance()
+        while not (window and window.closed.is_set()):
+            utterance = await hear()
+            if utterance is None:
+                continue
             listener.mute()
             try:
+                if window:
+                    window.set_state("thinking", heard="", said="")
                 heard = await asyncio.to_thread(transcribe, utterance, config["whisper_model"])
                 if not heard:
                     continue
                 print(f"kid:    {heard}", flush=True)
-                async for sentence in brain.reply(heard):
-                    print(f"skelly: {sentence}", flush=True)
-                    await speak(sentence, config, device)
+                if window:
+                    window.set_state("thinking", heard=f"You: {heard}")
+                async with session.lock:
+                    await session.ensure_connected()
+                    async for sentence in brain.reply(heard):
+                        print(f"skelly: {sentence}", flush=True)
+                        if window:
+                            window.set_state("talking", said=f"Skelly: {sentence}")
+                        await speak(sentence, config, session.device)
             except Exception as exc:
                 print(f"turn failed: {exc}", flush=True)
             finally:
                 await asyncio.sleep(0.3)
                 listener.unmute()
+    if pump:
+        pump.cancel()
 
 
 def listen_test(config: dict) -> int:

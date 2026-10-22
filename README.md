@@ -102,29 +102,39 @@ or the DecorPro application developers.
 ## macOS (`skelly_mac.py`)
 
 The same protocol over CoreBluetooth (bleak) and A2DP, plus a two-way talk mode:
-the Mac microphone → Whisper (on-device, Apple Silicon) → Claude → macOS `say`
-through Skelly's jaw.
+hold SPACE in a window → Mac microphone → Whisper (on-device) → Claude → an
+on-device neural voice through Skelly's jaw.
 
 ```bash
 brew install blueutil ffmpeg
 python3 -m venv .venv && .venv/bin/pip install -r requirements-mac.txt
 export ANTHROPIC_API_KEY=...        # talk mode only
 .venv/bin/python skelly_mac.py configure        # Skelly powered on and in range
-.venv/bin/python skelly_mac.py say "Happy Halloween!"
-.venv/bin/python skelly_mac.py talk
+.venv/bin/python skelly_mac.py talk             # push-to-talk window; Esc leaves fullscreen, F enters it
 ```
 
 `configure` finds the BLE endpoint, switches on Skelly's classic radio, pairs
-`12ft Skelly(Live)` (pass `--pin` if your unit asks for one) and writes
-`~/.config/openskelly/mac.json`. `lights`, `eyes` and `play` take the same
-arguments as the Linux CLI. Before the first `talk`, run
-`skelly_mac.py talk --listen-test` and set `vad_threshold` in `mac.json` just above
-the room's quiet level. macOS will ask for Bluetooth and Microphone permission for
-your terminal on first use.
+`12ft Skelly(Live)` (pass `--pin 1234` if your unit asks) and writes
+`~/.config/openskelly/mac.json`. macOS will ask for Bluetooth and Microphone
+permission for your terminal on first use.
 
-The voice is picked by `tts` in `mac.json`: `qwen` (default; Qwen3-TTS VoiceDesign,
-on-device, the voice is whatever `voice_instruct` describes), `kokoro` (fast
+Skelly plays a loud jingle every time the audio link connects or drops, so the
+Mac holds one connection for the whole session: `talk` and `serve` keep it up
+(reconnecting if it falls over) and `say`, `play`, `lights` and `eyes` are
+forwarded to the running process instead of opening their own link. `stop` ends
+the session. Without a server running those commands connect on their own.
+
+```bash
+.venv/bin/python skelly_mac.py serve &
+.venv/bin/python skelly_mac.py say "Happy Halloween!"
+.venv/bin/python skelly_mac.py lights color ff2200
+.venv/bin/python skelly_mac.py stop
+```
+
+The voice is picked by `tts` in `mac.json`: `qwen` (default; Qwen3-TTS
+VoiceDesign, the voice is whatever `voice_instruct` describes), `kokoro` (fast
 neural voice named by `voice`, e.g. `am_michael`) or `say` (macOS voice named by
 `voice`). `voice_fx` is an ffmpeg filter chain applied before the jaw; prepend
 `asetrate=44100*0.8,aresample=44100,` to pitch a voice down. Models download on
-first use (Qwen is about 1 GB).
+first use (Qwen is about 1 GB). `talk --vad` listens hands-free instead of the
+window; tune `vad_threshold` with `talk --listen-test`.
