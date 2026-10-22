@@ -237,14 +237,14 @@ _tts_model: object = None
 
 
 def load_tts_model(engine: str) -> object:
-    """Load an mlx-audio TTS model without transformers' harmless config-type warning."""
-    import logging
-
-    from mlx_audio.tts.utils import load_model
-
-    logging.getLogger("transformers").setLevel(logging.ERROR)
+    """Load an mlx-audio TTS model quietly (transformers' config-type warning is harmless here)."""
     import io
+    import os
     from contextlib import redirect_stdout
+
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")  # read when transformers is first imported
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    from mlx_audio.tts.utils import load_model
 
     with redirect_stdout(io.StringIO()):  # "Initialized encoder codebooks" / "Loaded speech tokenizer" chatter
         return load_model(TTS_MODELS[engine])
