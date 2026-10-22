@@ -78,10 +78,12 @@ def to_whisper_rate(audio: np.ndarray, rate: int) -> np.ndarray:
 
 
 class Listener:
-    def __init__(self, threshold: float, device: int | str | None = None) -> None:
-        self.segmenter = Segmenter(threshold)
+    def __init__(self, threshold: float, device: int | str | None = None, silence_seconds: float = 0.8) -> None:
+        self.segmenter = Segmenter(threshold, silence_blocks=int(silence_seconds * 1000 / 30))
         self.queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         self.muted = False
+        self.handsfree = False  # only then do blocks flow to the VAD queue
+        self.level = 0.0  # last block RMS, for the meter
         self.loop = asyncio.get_running_loop()
         self.rate = int(sd.query_devices(device, "input")["default_samplerate"])
         self.stream = sd.InputStream(samplerate=self.rate, channels=1, dtype="float32",
@@ -90,10 +92,16 @@ class Listener:
         self.recording: list[np.ndarray] | None = None
 
     def _callback(self, indata: np.ndarray, _frames: int, _time: object, _status: object) -> None:
+        mono = indata[:, 0].copy()
+        self.level = float(np.sqrt(np.mean(mono**2)))
         if self.recording is not None:
-            self.recording.append(indata[:, 0].copy())
-        elif not self.muted:
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, indata[:, 0].copy())
+            self.recording.append(mono)
+        elif self.handsfree and not self.muted:
+            self.loop.call_soon_threadsafe(self.queue.put_nowait, mono)
+
+    def set_handsfree(self, enabled: bool) -> None:
+        self.handsfree = enabled
+        self.unmute()
 
     def begin(self) -> None:
         self.recording = []
@@ -119,6 +127,20 @@ class Listener:
             utterance = self.segmenter.feed(await self.queue.get())
             if utterance is not None:
                 return to_whisper_rate(utterance, self.rate)
+
+
+SHORT_OK = {"hi", "hello", "boo", "hey", "yes", "no", "bye", "trick or treat", "happy halloween", "hi skelly",
+            "hey skelly", "hello skelly", "who are you", "what are you"}
+HALLUCINATIONS = {"thank you", "thanks for watching", "you", "bye", "thank you for watching", "subscribe"}
+
+
+def plausible(text: str) -> bool:
+    """Drop Whisper's noise hallucinations and stray fragments in hands-free mode."""
+    words = re.sub(r"[^a-z' ]", "", text.lower()).split()
+    phrase = " ".join(words)
+    if not words or phrase in HALLUCINATIONS:
+        return False
+    return len(words) >= 3 or phrase in SHORT_OK
 
 
 def transcribe(audio: np.ndarray, model: str) -> str:
@@ -172,7 +194,7 @@ class Brain:
 
 async def run(session: object, vad: bool = False) -> None:
     """Conversation loop on a skelly_mac.Session: push-to-talk window by default, energy VAD with vad=True."""
-    from skelly_mac import speak, synthesize
+    from skelly_mac import play_pcm, render, synthesize
 
     config = session.config
     window = None if vad else __import__("ui").TalkWindow()
@@ -180,24 +202,65 @@ async def run(session: object, vad: bool = False) -> None:
     await asyncio.to_thread(transcribe, np.zeros(MIC_RATE, dtype=np.float32), config["whisper_model"])
     await asyncio.to_thread(synthesize, "Boo.", config)
     brain = Brain(config.get("model", MODEL), config.get("persona") or PERSONA)
-    listener = Listener(config["vad_threshold"], config.get("mic_device"))
+    listener = Listener(config["vad_threshold"], config.get("mic_device"), float(config.get("vad_silence", 1.2)))
+    listener.set_handsfree(vad)
     session.listener = listener
     if window:
         window.on_clear = brain.reset
+        window.level_source = lambda: (listener.level, listener.segmenter.threshold)
     pump = asyncio.create_task(window.pump()) if window else None
+
+    async def first(*coros: object) -> int:
+        """Await several things; return the index of whichever finishes first and cancel the rest."""
+        tasks = [asyncio.ensure_future(c) for c in coros]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        return tasks.index(next(iter(done)))
 
     async def hear() -> np.ndarray | None:
         if window is None:
             return await listener.next_utterance()
-        if window.down:  # key already held (e.g. pressed while Skelly was talking)
-            window.pressed.set()
-        else:
-            window.set_state("idle")
-        await window.pressed.wait()
-        listener.begin()
-        window.set_state("listening")
-        await window.released.wait()
-        return listener.end()
+        while True:
+            window.mode_changed.clear()
+            if window.handsfree:
+                listener.set_handsfree(True)
+                window.set_state("waiting")
+                vad_task = asyncio.ensure_future(listener.next_utterance())
+                if await first(vad_task, window.mode_changed.wait()) == 0:
+                    return vad_task.result()
+                continue
+            listener.set_handsfree(False)
+            if window.down:  # key already held (e.g. pressed while Skelly was talking)
+                window.pressed.set()
+            else:
+                window.set_state("idle")
+            if await first(window.pressed.wait(), window.mode_changed.wait()) == 1:
+                continue
+            listener.begin()
+            window.set_state("listening")
+            await window.released.wait()
+            return listener.end()
+
+    async def speak_streamed(heard: str) -> None:
+        """Render sentence N+1 while sentence N plays, so there is no dead air between them."""
+        queue: asyncio.Queue[asyncio.Task | None] = asyncio.Queue()
+
+        async def produce() -> None:
+            try:
+                async for sentence in brain.reply(heard):
+                    print(f"skelly: {sentence}", flush=True)
+                    queue.put_nowait(asyncio.create_task(render(sentence, config), name=sentence))
+            finally:
+                queue.put_nowait(None)
+
+        producer = asyncio.create_task(produce())
+        while (job := await queue.get()) is not None:
+            pcm = await job
+            if window:
+                window.set_state("talking", said=f"Skelly: {job.get_name()}")
+            await asyncio.to_thread(play_pcm, pcm, session.device)
+        await producer
 
     with listener.stream:
         print("Skelly is listening. Ctrl-C to stop.", flush=True)
@@ -210,29 +273,26 @@ async def run(session: object, vad: bool = False) -> None:
                 if window:
                     window.set_state("thinking", heard="", said="")
                 heard = await asyncio.to_thread(transcribe, utterance, config["whisper_model"])
-                if not heard:
-                    print("kid:    (nothing understood)", flush=True)
-                    if window:
+                handsfree = vad or (window is not None and window.handsfree)
+                if not heard or (handsfree and not plausible(heard)):
+                    print(f"kid:    (ignored: {heard!r})", flush=True)
+                    if window and not handsfree:
                         window.set_state("idle", heard="I didn't catch that. Hold SPACE and speak up!")
                         await asyncio.sleep(1.5)
                     continue
                 print(f"kid:    {heard}", flush=True)
                 if window:
-                    window.set_state("thinking", heard=f"You: {heard}")
+                    window.set_state("thinking", heard=f"You: {heard}", said="")
                 async with session.lock:
                     await session.ensure_connected()
-                    async for sentence in brain.reply(heard):
-                        print(f"skelly: {sentence}", flush=True)
-                        if window:
-                            window.set_state("talking", said=f"Skelly: {sentence}")
-                        await speak(sentence, config, session.device)
+                    await speak_streamed(heard)
             except Exception as exc:
                 print(f"turn failed: {exc!r}", flush=True)
                 if window:
                     window.set_state("idle", said=f"Error: {exc}"[:300])
                     await asyncio.sleep(3)
             finally:
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.5)  # let the Skelly's last echo die before the mic re-arms
                 listener.unmute()
     if pump:
         pump.cancel()

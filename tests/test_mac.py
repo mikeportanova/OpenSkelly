@@ -113,3 +113,34 @@ class VoiceFxTests(unittest.TestCase):
         pcm = skelly_mac.decode_audio(tone.tobytes(), None, rate)
         self.assertAlmostEqual(len(pcm) / skelly_mac.RATE, 1 + skelly_mac.TAIL_SECONDS, delta=0.05)
         self.assertEqual(int(np.abs(pcm[-int(0.5 * skelly_mac.RATE):]).max()), 0)
+
+
+class HandsFreeTests(unittest.TestCase):
+    def test_plausible_filters_whisper_noise(self):
+        self.assertTrue(talk.plausible("Hi Skelly, I am a dragon!"))
+        self.assertTrue(talk.plausible("Trick or treat"))
+        self.assertTrue(talk.plausible("boo"))
+        self.assertFalse(talk.plausible("Thank you."))
+        self.assertFalse(talk.plausible("Thanks for watching!"))
+        self.assertFalse(talk.plausible("the"))
+        self.assertFalse(talk.plausible(""))
+
+    def test_callback_queues_only_in_handsfree(self):
+        import asyncio
+
+        async def go():
+            listener = talk.Listener.__new__(talk.Listener)
+            listener.rate, listener.muted, listener.recording, listener.handsfree = talk.MIC_RATE, False, None, False
+            listener.queue, listener.loop = asyncio.Queue(), asyncio.get_running_loop()
+            listener.segmenter = talk.Segmenter(0.02)
+            block = np.full((talk.BLOCK, 1), 0.1, dtype=np.float32)
+            listener._callback(block, talk.BLOCK, None, None)
+            await asyncio.sleep(0)
+            self.assertTrue(listener.queue.empty())  # push-to-talk: nothing piles up
+            self.assertAlmostEqual(listener.level, 0.1, places=3)
+            listener.set_handsfree(True)
+            listener._callback(block, talk.BLOCK, None, None)
+            await asyncio.sleep(0)
+            self.assertEqual(listener.queue.qsize(), 1)
+
+        asyncio.run(go())

@@ -10,6 +10,7 @@ STATES = {
     "listening": ("Skelly is listening…", "#0f6b2f", "#ffffff"),
     "thinking": ("Skelly is thinking…", "#8a6d00", "#ffffff"),
     "talking": ("Skelly is talking", "#8b1e1e", "#ffffff"),
+    "waiting": ("Skelly is listening for voices…", "#1f4a6b", "#ffffff"),
 }
 
 
@@ -26,10 +27,21 @@ class TalkWindow:
         self.said = tk.Label(self.root, text="", font=("Helvetica", 22, "italic"), wraplength=840, justify="center")
         self.said.pack(fill="x", padx=30, pady=(10, 40))
         self.on_clear = lambda: None  # talk.run points this at Brain.reset
+        self.level_source = lambda: (0.0, 1.0)  # talk.run: () -> (mic rms, speech threshold)
+        self.handsfree = False
+        self.mode_changed = asyncio.Event()
+        bottom = tk.Frame(self.root, highlightthickness=0)
+        bottom.pack(side="bottom", fill="x", padx=20, pady=16)
+        self.bottom = bottom
+        self.meter = tk.Canvas(bottom, width=260, height=14, highlightthickness=0)
+        self.meter.pack(side="left")
+        self.mode_button = tk.Button(bottom, text="Hands-free: off", font=("Helvetica", 14), takefocus=0,
+                                     highlightthickness=0, command=self._toggle_mode)
+        self.mode_button.pack(side="left", padx=16)
         # takefocus=0 so the button never owns the keyboard: SPACE must stay push-to-talk, not "press button"
-        self.clear_button = tk.Button(self.root, text="Clear memory", font=("Helvetica", 14), takefocus=0,
+        self.clear_button = tk.Button(bottom, text="Clear memory", font=("Helvetica", 14), takefocus=0,
                                       highlightthickness=0, command=self._clear)
-        self.clear_button.pack(side="bottom", anchor="e", padx=20, pady=16)
+        self.clear_button.pack(side="right")
         self.down = False
         self.pending_release: str | None = None
         self.pressed = asyncio.Event()
@@ -64,6 +76,20 @@ class TalkWindow:
             self.pressed.clear()
             self.released.set()
 
+    def _toggle_mode(self) -> None:
+        self.handsfree = not self.handsfree
+        self.mode_button.configure(text=f"Hands-free: {'on' if self.handsfree else 'off'}")
+        self.mode_changed.set()
+        self.root.focus_force()
+
+    def _draw_meter(self) -> None:
+        level, threshold = self.level_source()
+        fill = min(1.0, level / (threshold * 2.5))  # threshold sits at 40% of the bar
+        self.meter.delete("all")
+        self.meter.create_rectangle(0, 0, 260, 14, fill="#000000", outline="")
+        self.meter.create_rectangle(0, 0, int(260 * fill), 14, fill="#3ddc84" if level >= threshold else "#5a5a7a", outline="")
+        self.meter.create_line(104, 0, 104, 14, fill="#ffffff")
+
     def _clear(self) -> None:
         self.on_clear()
         self.heard.configure(text="Memory cleared. Skelly forgot everything.")
@@ -74,6 +100,7 @@ class TalkWindow:
         text, bg, fg = STATES[state]
         self.status.configure(text=text, bg=bg, fg=fg)
         self.root.configure(bg=bg)
+        self.bottom.configure(bg=bg)
         for label, value in ((self.heard, heard), (self.said, said)):
             label.configure(bg=bg, fg=fg)
             if value is not None:
@@ -83,6 +110,7 @@ class TalkWindow:
         """Drive Tk from the asyncio loop until the window closes."""
         while not self.closed.is_set():
             try:
+                self._draw_meter()
                 self.root.update()
             except tk.TclError:
                 break

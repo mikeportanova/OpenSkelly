@@ -56,7 +56,8 @@ DEFAULTS = {
     "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,loudnorm=I=-10:TP=-1",
     "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
     "whisper_model": "mlx-community/whisper-small-mlx",
-    "vad_threshold": 0.02,
+    "vad_threshold": 0.02,  # hands-free: RMS above this is speech (talk --listen-test shows the room)
+    "vad_silence": 1.2,  # hands-free: seconds of quiet that end a kid's turn
     "mic_device": None,  # input device name or substring, e.g. "Yeti"; None = system default
 }
 
@@ -233,15 +234,18 @@ def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
     return np.concatenate(chunks).tobytes(), rate
 
 
-async def speak(text: str, config: dict, device: int) -> None:
-    """TTS -> ffmpeg effects -> the Skelly sink; the jaw follows the audio level."""
+async def render(text: str, config: dict) -> np.ndarray:
+    """TTS -> ffmpeg effects -> PCM ready for the jaw."""
     source, rate = await asyncio.to_thread(synthesize, text, config)
     try:
-        pcm = await asyncio.to_thread(decode_audio, source, config["voice_fx"] or None, rate)
+        return await asyncio.to_thread(decode_audio, source, config["voice_fx"] or None, rate)
     finally:
         if isinstance(source, Path):
             source.unlink(missing_ok=True)
-    await asyncio.to_thread(play_pcm, pcm, device)
+
+
+async def speak(text: str, config: dict, device: int) -> None:
+    await asyncio.to_thread(play_pcm, await render(text, config), device)
 
 
 # ---------------------------------------------------------------- resident server
