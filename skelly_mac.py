@@ -57,6 +57,7 @@ DEFAULTS = {
     "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
     "whisper_model": "mlx-community/whisper-small-mlx",
     "vad_threshold": 0.02,
+    "mic_device": None,  # input device name or substring, e.g. "Yeti"; None = system default
 }
 
 

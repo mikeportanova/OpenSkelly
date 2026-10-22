@@ -11,8 +11,8 @@ from typing import AsyncIterator
 import numpy as np
 import sounddevice as sd
 
-MIC_RATE = 16000
-BLOCK = 480  # 30 ms
+MIC_RATE = 16000  # what Whisper wants; the mic is opened at its own rate and resampled
+BLOCK = 480  # 30 ms at MIC_RATE; a Listener scales it to its device rate
 MODEL = "claude-opus-5-5"
 PERSONA = (
     "You are Skelly, a 12-foot-tall skeleton standing in a front yard on Halloween night, chatting with "
@@ -65,14 +65,27 @@ def split_sentences(text: str) -> tuple[list[str], str]:
     return [p for p in parts[:-1] if p.strip()], parts[-1]
 
 
+def to_whisper_rate(audio: np.ndarray, rate: int) -> np.ndarray:
+    """Resample mono float32 PCM to MIC_RATE (USB mics such as a Blue Yeti only run at 44.1/48 kHz)."""
+    if rate == MIC_RATE:
+        return audio
+    import subprocess
+
+    raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(rate), "-ac", "1",
+                          "-i", "-", "-f", "f32le", "-ar", str(MIC_RATE), "-ac", "1", "-"],
+                         input=audio.astype(np.float32).tobytes(), capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.float32)
+
+
 class Listener:
     def __init__(self, threshold: float, device: int | str | None = None) -> None:
         self.segmenter = Segmenter(threshold)
         self.queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         self.muted = False
         self.loop = asyncio.get_running_loop()
-        self.stream = sd.InputStream(samplerate=MIC_RATE, channels=1, dtype="float32", blocksize=BLOCK,
-                                     device=device, callback=self._callback)
+        self.rate = int(sd.query_devices(device, "input")["default_samplerate"])
+        self.stream = sd.InputStream(samplerate=self.rate, channels=1, dtype="float32",
+                                     blocksize=BLOCK * self.rate // MIC_RATE, device=device, callback=self._callback)
 
         self.recording: list[np.ndarray] | None = None
 
@@ -88,7 +101,9 @@ class Listener:
     def end(self) -> np.ndarray | None:
         """Stop push-to-talk recording; None when it was too short to be a word."""
         blocks, self.recording = self.recording or [], None
-        return np.concatenate(blocks) if len(blocks) * BLOCK >= MIC_RATE * 0.3 else None
+        if sum(len(b) for b in blocks) < self.rate * 0.3:
+            return None
+        return to_whisper_rate(np.concatenate(blocks), self.rate)
 
     def mute(self) -> None:
         self.muted = True
@@ -103,7 +118,7 @@ class Listener:
         while True:
             utterance = self.segmenter.feed(await self.queue.get())
             if utterance is not None:
-                return utterance
+                return to_whisper_rate(utterance, self.rate)
 
 
 def transcribe(audio: np.ndarray, model: str) -> str:
@@ -227,9 +242,10 @@ def listen_test(config: dict) -> int:
     """Print per-second mic RMS so the VAD threshold can be set above room noise."""
     print(f"threshold={config['vad_threshold']}; speak at Skelly distance for 5 s", flush=True)
     end = time.monotonic() + 5
-    with sd.InputStream(samplerate=MIC_RATE, channels=1, dtype="float32", device=config.get("mic_device")) as s:
+    rate = int(sd.query_devices(config.get("mic_device"), "input")["default_samplerate"])
+    with sd.InputStream(samplerate=rate, channels=1, dtype="float32", device=config.get("mic_device")) as s:
         while time.monotonic() < end:
-            block, _ = s.read(MIC_RATE // 4)
+            block, _ = s.read(rate // 4)
             rms = float(np.sqrt(np.mean(block**2)))
             print(f"rms={rms:.4f} {'SPEECH' if rms > config['vad_threshold'] else ''}", flush=True)
     return 0

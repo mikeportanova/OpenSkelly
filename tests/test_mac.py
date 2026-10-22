@@ -56,6 +56,7 @@ class PushToTalkTests(unittest.TestCase):
 
         async def go():
             listener = talk.Listener.__new__(talk.Listener)
+            listener.rate = talk.MIC_RATE
             listener.muted = False
             listener.recording = None
             listener.queue = asyncio.Queue()
@@ -72,6 +73,14 @@ class PushToTalkTests(unittest.TestCase):
             self.assertIsNone(listener.recording)
 
         asyncio.run(go())
+
+
+class ResampleTests(unittest.TestCase):
+    def test_48k_mic_audio_reaches_whisper_at_16k(self):
+        tone = np.sin(2 * np.pi * 440 * np.arange(48000) / 48000).astype(np.float32)
+        out = talk.to_whisper_rate(tone, 48000)
+        self.assertAlmostEqual(len(out), talk.MIC_RATE, delta=20)
+        self.assertIs(talk.to_whisper_rate(tone, talk.MIC_RATE), tone)
 
 
 class MemoryTests(unittest.TestCase):
