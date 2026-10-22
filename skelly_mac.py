@@ -193,11 +193,19 @@ async def cmd_configure(args: argparse.Namespace) -> int:
             if not live_mac:
                 print(f"{LIVE_NAME} not found; pair it in System Settings > Bluetooth, then rerun.", file=sys.stderr)
                 return 1
+            print(f"Found {LIVE_NAME} at {live_mac}; pairing…", flush=True)
             pair = ["blueutil", "--pair", live_mac] + ([args.pin] if args.pin else [])
-            run(*pair, timeout=60)
+            try:  # stdin closed so a PIN prompt fails fast instead of hanging invisibly
+                subprocess.run(pair, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
             if run("blueutil", "--is-paired", live_mac).strip() != "1":
-                print(f"pairing failed; pair {LIVE_NAME} ({live_mac}) in System Settings > Bluetooth.", file=sys.stderr)
-                return 1
+                print(f"Automatic pairing failed. Open System Settings > Bluetooth, pair {LIVE_NAME} "
+                      "(enter the PIN from the box or the DecorPro app if asked), then press Enter here.")
+                await asyncio.to_thread(input)
+                if run("blueutil", "--is-paired", live_mac).strip() != "1":
+                    print(f"{LIVE_NAME} is still not paired; retry with: configure --pin <PIN>", file=sys.stderr)
+                    return 1
             run("blueutil", "--disconnect", live_mac)
     config = load_config() if CONFIG_FILE.exists() else dict(DEFAULTS)
     config.update({"ble_address": address, "live_mac": live_mac, "voice": args.voice or config["voice"]})
