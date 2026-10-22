@@ -151,8 +151,21 @@ def output_device_index(name: str = LIVE_NAME, wait: float = 20) -> int:
         time.sleep(0.5)
 
 
+def default_outputs() -> dict[str, str]:
+    """Current macOS default output and alert devices, by SwitchAudioSource type."""
+    return {kind: run("SwitchAudioSource", "-c", "-t", kind).strip() for kind in ("output", "system")}
+
+
+def restore_default_outputs(previous: dict[str, str]) -> None:
+    """Keep every other Mac sound on the speakers: only our explicit playback targets the Skelly."""
+    for kind, name in previous.items():
+        if name and LIVE_NAME not in name:
+            run("SwitchAudioSource", "-s", name, "-t", kind)
+
+
 async def connect_live(skelly: Skelly, live_mac: str) -> int:
     """Run the DecorPro Live handshake; returns the Skelly output device index."""
+    previous = default_outputs()  # macOS will switch these to the Skelly when it connects
     await skelly.write(COMMANDS["stop_file"])
     await skelly.write(COMMANDS["stop_live"])
     await skelly.write(COMMANDS["enable_live_radio"], ack=ACK_LIVE_RADIO)
@@ -166,7 +179,9 @@ async def connect_live(skelly: Skelly, live_mac: str) -> int:
         raise RuntimeError(f"could not connect {LIVE_NAME}; pair it first with: skelly_mac.py configure")
     await skelly.write(COMMANDS["select_bluetooth"], ack=ACK_BLUETOOTH)
     device = output_device_index()
-    run("osascript", "-e", "set volume output volume 100")  # a fresh BT sink defaults to 50
+    run("SwitchAudioSource", "-s", LIVE_NAME, "-t", "output")
+    run("osascript", "-e", "set volume output volume 100")  # acts on the default device: a fresh BT sink sits at 50
+    restore_default_outputs(previous)
     await skelly.write(COMMANDS["start_live"])
     await asyncio.sleep(0.08)
     await skelly.write(COMMANDS["volume_100"])

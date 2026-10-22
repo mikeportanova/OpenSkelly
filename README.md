@@ -106,7 +106,7 @@ hold SPACE in a window → Mac microphone → Whisper (on-device) → Claude →
 on-device neural voice through Skelly's jaw.
 
 ```bash
-brew install blueutil ffmpeg
+brew install blueutil ffmpeg switchaudio-osx
 python3 -m venv .venv && .venv/bin/pip install -r requirements-mac.txt
 export ANTHROPIC_API_KEY=...        # talk mode only
 .venv/bin/python skelly_mac.py configure        # Skelly powered on and in range

@@ -242,25 +242,33 @@ async def run(session: object, vad: bool = False) -> None:
             await window.released.wait()
             return listener.end()
 
-    async def speak_streamed(heard: str) -> None:
+    async def speak_streamed(heard: str) -> dict[str, float]:
         """Render sentence N+1 while sentence N plays, so there is no dead air between them."""
         queue: asyncio.Queue[asyncio.Task | None] = asyncio.Queue()
+        timing = {"llm": 0.0, "tts": 0.0}
+        start = time.monotonic()
 
         async def produce() -> None:
             try:
                 async for sentence in brain.reply(heard):
+                    timing["llm"] = timing["llm"] or time.monotonic() - start
                     print(f"skelly: {sentence}", flush=True)
                     queue.put_nowait(asyncio.create_task(render(sentence, config), name=sentence))
             finally:
                 queue.put_nowait(None)
 
         producer = asyncio.create_task(produce())
+        first = True
         while (job := await queue.get()) is not None:
             pcm = await job
+            if first:
+                timing["tts"] = time.monotonic() - start - timing["llm"]
+                first = False
             if window:
                 window.set_state("talking", said=f"Skelly: {job.get_name()}")
             await asyncio.to_thread(play_pcm, pcm, session.device)
         await producer
+        return timing
 
     with listener.stream:
         print("Skelly is listening. Ctrl-C to stop.", flush=True)
@@ -272,7 +280,9 @@ async def run(session: object, vad: bool = False) -> None:
             try:
                 if window:
                     window.set_state("thinking", heard="", said="")
+                t0 = time.monotonic()
                 heard = await asyncio.to_thread(transcribe, utterance, config["whisper_model"])
+                t_stt = time.monotonic() - t0
                 handsfree = vad or (window is not None and window.handsfree)
                 if not heard or (handsfree and not plausible(heard)):
                     print(f"kid:    (ignored: {heard!r})", flush=True)
@@ -285,7 +295,9 @@ async def run(session: object, vad: bool = False) -> None:
                     window.set_state("thinking", heard=f"You: {heard}", said="")
                 async with session.lock:
                     await session.ensure_connected()
-                    await speak_streamed(heard)
+                    timing = await speak_streamed(heard)
+                print(f"timing: stt {t_stt:.1f}s | first sentence from claude {timing['llm']:.1f}s | "
+                      f"its tts {timing['tts']:.1f}s | first audio {t_stt + timing['llm'] + timing['tts']:.1f}s after release", flush=True)
             except Exception as exc:
                 print(f"turn failed: {exc!r}", flush=True)
                 if window:

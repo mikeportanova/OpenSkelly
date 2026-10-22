@@ -144,3 +144,15 @@ class HandsFreeTests(unittest.TestCase):
             self.assertEqual(listener.queue.qsize(), 1)
 
         asyncio.run(go())
+
+
+class DefaultOutputTests(unittest.TestCase):
+    def test_restore_never_points_the_mac_at_the_skelly(self):
+        calls = []
+        original = skelly_mac.run
+        skelly_mac.run = lambda *a, **k: calls.append(a) or ""
+        try:
+            skelly_mac.restore_default_outputs({"output": "MacBook Pro Speakers", "system": "12ft Skelly(Live)"})
+        finally:
+            skelly_mac.run = original
+        self.assertEqual(calls, [("SwitchAudioSource", "-s", "MacBook Pro Speakers", "-t", "output")])
