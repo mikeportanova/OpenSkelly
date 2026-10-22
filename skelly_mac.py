@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -462,6 +463,8 @@ async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
                 except Exception as exc:
                     print(f"reconnect failed: {exc}", flush=True)
 
+    for sig in (signal.SIGINT, signal.SIGTERM):  # Ctrl-C = graceful stop: stop_live, disconnect, restore outputs
+        asyncio.get_running_loop().add_signal_handler(sig, stop.set)
     CONTROL_SOCKET.parent.mkdir(exist_ok=True)
     CONTROL_SOCKET.unlink(missing_ok=True)
     server = await asyncio.start_unix_server(on_client, path=str(CONTROL_SOCKET))
@@ -484,6 +487,8 @@ async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
         server.close()
         CONTROL_SOCKET.unlink(missing_ok=True)
         await session.close()
+        _tts_executor.shutdown(wait=False, cancel_futures=True)
+        print("Skelly session closed", flush=True)
     return 0
 
 
