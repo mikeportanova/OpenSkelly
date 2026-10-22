@@ -141,5 +141,9 @@ how he answers (the voice description only shapes how he sounds). `voice_fx` is
 an ffmpeg filter chain applied before the jaw; prepend
 `asetrate=44100*0.8,aresample=44100,` to pitch a voice down. Models download on
 first use (Qwen is about 1 GB). `mic_device` picks the microphone by name (e.g.
-`"Yeti"`; set it to cardioid and point it at the kids). `talk --vad` listens
-hands-free instead of the window; tune `vad_threshold` with `talk --listen-test`.
+`"Yeti"`; set it to cardioid and point it at the kids). The window's
+**Hands-free** button switches from push-to-talk to listening for voices: a turn
+starts when the mic level crosses `vad_threshold` (the meter at the bottom shows
+the level against it; `talk --listen-test` prints it) and ends after
+`vad_silence` seconds of quiet; short fragments and Whisper's noise
+hallucinations are ignored. `talk --vad` starts hands-free without the window.
