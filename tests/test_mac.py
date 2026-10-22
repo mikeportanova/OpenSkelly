@@ -156,3 +156,27 @@ class DefaultOutputTests(unittest.TestCase):
         finally:
             skelly_mac.run = original
         self.assertEqual(calls, [("SwitchAudioSource", "-s", "MacBook Pro Speakers", "-t", "output")])
+
+
+class StreamJobTests(unittest.TestCase):
+    def test_chunks_flow_through_fx_to_frame_aligned_output(self):
+        import asyncio
+
+        tone = (0.3 * np.sin(2 * np.pi * 440 * np.arange(skelly_mac.STREAM_RATE) / skelly_mac.STREAM_RATE)).astype(np.float32)
+        chunks = [tone[i:i + 6000].tobytes() for i in range(0, len(tone), 6000)]
+        original = skelly_mac.synthesize_stream
+        skelly_mac.synthesize_stream = lambda text, config: iter(chunks)
+        try:
+            async def go():
+                job = skelly_mac.StreamJob("x", {"voice_fx": "volume=2dB", "tts": "clone"})
+                await asyncio.wait_for(job.started, 10)
+                frames = await asyncio.to_thread(lambda: list(job.frames()))
+                await job.generation
+                return frames
+
+            frames = asyncio.run(go())
+        finally:
+            skelly_mac.synthesize_stream = original
+        self.assertTrue(all(len(f) % 4 == 0 for f in frames))
+        seconds = sum(len(f) for f in frames) / 4 / skelly_mac.RATE
+        self.assertAlmostEqual(seconds, 1 + skelly_mac.TAIL_SECONDS, delta=0.05)

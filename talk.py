@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import time
 from collections import deque
@@ -167,14 +168,16 @@ class Brain:
         """Stream the answer back one sentence at a time."""
         self.messages.append({"role": "user", "content": text})
         buffer = ""
+        extra = {}  # server-side refusal fallbacks exist for Opus/Sonnet/Fable, not Haiku
+        if not self.model.startswith("claude-haiku"):
+            extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
         async with self.client.beta.messages.stream(
             model=self.model,
             max_tokens=300,
             system=[{"type": "text", "text": self.persona, "cache_control": {"type": "ephemeral"}}],
             messages=self.messages,
             output_config={"effort": "low"},
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
+            **extra,
         ) as stream:
             async for chunk in stream.text_stream:
                 buffer += chunk
@@ -194,13 +197,26 @@ class Brain:
 
 async def run(session: object, vad: bool = False) -> None:
     """Conversation loop on a skelly_mac.Session: push-to-talk window by default, energy VAD with vad=True."""
-    from skelly_mac import play_pcm, render, synthesize
+    from skelly_mac import FILLERS, FILLER_AFTER, StreamJob, filler_pcm, play_pcm, render, synthesize
 
     config = session.config
     window = None if vad else __import__("ui").TalkWindow()
     print("Loading speech models (first run downloads them)…", flush=True)
     await asyncio.to_thread(transcribe, np.zeros(MIC_RATE, dtype=np.float32), config["whisper_model"])
     await asyncio.to_thread(synthesize, "Boo.", config)
+    streaming = config["tts"] in ("clone", "qwen")
+    fillers: list[np.ndarray] = []
+    if config.get("filler"):
+        print("Preparing fillers…", flush=True)
+        fillers = [await asyncio.to_thread(filler_pcm, config, line) for line in FILLERS]
+    recent: list[int] = []
+
+    def pick_filler() -> np.ndarray:
+        choice = random.choice([i for i in range(len(fillers)) if i not in recent])
+        recent.append(choice)
+        del recent[:-6]  # no repeats within the last six
+        return fillers[choice]
+
     brain = Brain(config.get("model", MODEL), config.get("persona") or PERSONA)
     listener = Listener(config["vad_threshold"], config.get("mic_device"), float(config.get("vad_silence", 1.2)))
     listener.set_handsfree(vad)
@@ -253,20 +269,33 @@ async def run(session: object, vad: bool = False) -> None:
                 async for sentence in brain.reply(heard):
                     timing["llm"] = timing["llm"] or time.monotonic() - start
                     print(f"skelly: {sentence}", flush=True)
-                    queue.put_nowait(asyncio.create_task(render(sentence, config), name=sentence))
+                    job = StreamJob(sentence, config) if streaming else asyncio.create_task(render(sentence, config))
+                    queue.put_nowait((sentence, job))
             finally:
                 queue.put_nowait(None)
 
         producer = asyncio.create_task(produce())
         first = True
-        while (job := await queue.get()) is not None:
-            pcm = await job
+        while (item := await queue.get()) is not None:
+            sentence, job = item
             if first:
+                ready = job.started if streaming else job
+                try:
+                    await asyncio.wait_for(asyncio.shield(ready), FILLER_AFTER)
+                except asyncio.TimeoutError:
+                    if fillers:
+                        print("skelly: (filler)", flush=True)
+                        await asyncio.to_thread(play_pcm, pick_filler(), session.device)
+                await ready
                 timing["tts"] = time.monotonic() - start - timing["llm"]
                 first = False
             if window:
-                window.set_state("talking", said=f"Skelly: {job.get_name()}")
-            await asyncio.to_thread(play_pcm, pcm, session.device)
+                window.set_state("talking", said=f"Skelly: {sentence}")
+            if streaming:
+                await asyncio.to_thread(job.play, session.device)
+                await job.generation
+            else:
+                await asyncio.to_thread(play_pcm, await job, session.device)
         await producer
         return timing
 

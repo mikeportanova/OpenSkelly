@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import re
 import socket
@@ -12,7 +13,9 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import sounddevice as sd
@@ -52,8 +55,12 @@ DEFAULTS = {
                       "cavernous and hollow.",
     "voice_seed": 42,  # VoiceDesign seed used by `voice design` to render the reference clip
     "voice_ref_text": REF_TEXT,
-    # ffmpeg chain before the jaw: slight pitch-down, cavern echo, loudness for the mouth threshold
-    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,loudnorm=I=-10:TP=-1",
+    # ffmpeg chain before the jaw: slight pitch-down, cavern echo, then level for the mouth threshold.
+    # Every filter here is stream-safe (no loudnorm: it needs the whole clip and the voice is streamed).
+    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,"
+                "acompressor=threshold=-24dB:ratio=3:attack=5:release=120:makeup=8,volume=5dB,alimiter=limit=0.9:attack=5:release=60",
+    "model": "claude-haiku-5-5",  # chat model; Haiku answers fastest, which is what a kid at the door needs
+    "filler": True,  # play a short cloned interjection when the reply takes longer than FILLER_AFTER
     "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
     "whisper_model": "mlx-community/whisper-small-mlx",
     "vad_threshold": 0.02,  # hands-free: RMS above this is speech (talk --listen-test shows the room)
@@ -216,6 +223,15 @@ def play_pcm(pcm: np.ndarray, device: int) -> None:
 
 
 _tts_model: object = None
+_tts_executor = ThreadPoolExecutor(max_workers=1)  # MLX generation is not reentrant: one sentence at a time
+STREAM_RATE = 24000  # mlx TTS output
+FILLER_AFTER = 0.7  # seconds of silence after the kid stops before a filler covers the wait
+FILLER_DIR = CONFIG_FILE.parent / "fillers"
+FILLERS = [
+    "Hmmmm.", "Let me think, little one.", "Ahh, interesting.", "Well now.", "Oh ho ho.", "Hmm, yes, yes.",
+    "Let me rattle my bones about that.", "Ooooh.", "One moment, mortal.", "Ha! Very well.", "My, my.",
+    "Hmm. Curious.", "Patience, child.", "Let me consult my skull.",
+]
 
 
 def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
@@ -247,6 +263,84 @@ def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
         chunks.append(np.array(result.audio, dtype=np.float32))
         rate = result.sample_rate
     return np.concatenate(chunks).tobytes(), rate
+
+
+def synthesize_stream(text: str, config: dict) -> Iterator[bytes]:
+    """Clone/design TTS as mono float32 chunks at STREAM_RATE, yielded while the model is still generating."""
+    global _tts_model
+    from mlx_audio.tts.utils import load_model
+
+    if _tts_model is None:
+        _tts_model = load_model(TTS_MODELS[config["tts"]])
+    if config["tts"] == "clone":
+        results = _tts_model.generate(text, ref_audio=str(VOICE_REF), ref_text=config["voice_ref_text"], lang_code="en",
+                                      stream=True, streaming_interval=1.0)
+    else:
+        import mlx.core as mx
+
+        mx.random.seed(int(config["voice_seed"]))
+        results = _tts_model.generate(text, instruct=config["voice_instruct"], lang_code="en", stream=True, streaming_interval=1.0)
+    for result in results:
+        yield np.array(result.audio, dtype=np.float32).tobytes()
+
+
+def fx_args(filters: str | None, in_rate: int) -> list[str]:
+    return ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(in_rate), "-ac", "1", "-i", "-",
+            "-af", f"aresample={RATE}" + (f",{filters}" if filters else "") + f",apad=pad_dur={TAIL_SECONDS}",
+            "-f", "s16le", "-ar", str(RATE), "-ac", "2", "-"]
+
+
+class StreamJob:
+    """One sentence: TTS chunks -> ffmpeg fx (live) -> the jaw, playing while the rest is still generating."""
+
+    def __init__(self, text: str, config: dict) -> None:
+        self.text = text
+        self.config = config
+        self.proc = subprocess.Popen(fx_args(config["voice_fx"] or None, STREAM_RATE), stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.started = asyncio.get_running_loop().create_future()  # resolved when the first chunk exists
+        self.generation = asyncio.get_running_loop().run_in_executor(_tts_executor, self._generate)
+
+    def _generate(self) -> None:
+        loop = self.started.get_loop()
+        try:
+            for chunk in synthesize_stream(self.text, self.config):
+                self.proc.stdin.write(chunk)
+                if not self.started.done():
+                    loop.call_soon_threadsafe(lambda: self.started.done() or self.started.set_result(True))
+        except Exception as exc:
+            loop.call_soon_threadsafe(lambda: self.started.done() or self.started.set_exception(exc))
+            raise
+        finally:
+            self.proc.stdin.close()
+
+    def frames(self, frame_bytes: int = RATE * 4 // 10) -> Iterator[bytes]:
+        """Processed stereo int16 PCM in ~100 ms pieces, frame-aligned."""
+        rest = b""
+        while chunk := self.proc.stdout.read(frame_bytes):
+            data = rest + chunk
+            cut = len(data) // 4 * 4
+            yield data[:cut]
+            rest = data[cut:]
+        self.proc.wait()
+
+    def play(self, device: int) -> None:
+        with sd.RawOutputStream(samplerate=RATE, channels=2, dtype="int16", device=device) as out:
+            for frame in self.frames():
+                out.write(frame)
+
+
+def filler_pcm(config: dict, text: str) -> np.ndarray:
+    """A rendered filler line, cached on disk per voice reference and fx chain."""
+    stamp = f"{text}|{VOICE_REF.stat().st_mtime if VOICE_REF.exists() else 0}|{config['tts']}|{config['voice_fx']}"
+    path = FILLER_DIR / (hashlib.sha1(stamp.encode()).hexdigest() + ".npy")
+    if path.exists():
+        return np.load(path)
+    source, rate = synthesize(text, config)
+    pcm = decode_audio(source, config["voice_fx"] or None, rate)
+    FILLER_DIR.mkdir(parents=True, exist_ok=True)
+    np.save(path, pcm)
+    return pcm
 
 
 async def render(text: str, config: dict) -> np.ndarray:
