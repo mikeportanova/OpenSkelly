@@ -205,6 +205,7 @@ class Brain:
         spoken: list[str] = []
         try:
             async for sentence in self._stream(spoken):
+                spoken.append(sentence)
                 yield sentence
         except asyncio.CancelledError:  # the kid interrupted: remember what he managed to say
             if spoken:
@@ -231,12 +232,10 @@ class Brain:
                     buffer += chunk
                     done, buffer = split_sentences(buffer)
                     for sentence in done:
-                        spoken.append(sentence)
-                        yield sentence
+                        yield sentence  # reply() records it in `spoken` once it has been handed on
                 final = await stream.get_final_message()
             if final.stop_reason != "refusal" and any(b.type == "text" for b in final.content):
                 if buffer.strip():
-                    spoken.append(buffer.strip())
                     yield buffer.strip()
                 self.messages.append({"role": "assistant", "content": final.content})
                 del self.messages[:-40]
