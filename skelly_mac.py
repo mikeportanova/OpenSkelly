@@ -175,8 +175,8 @@ def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None 
         args += ["-f", "f32le", "-ar", str(in_rate), "-ac", "1", "-i", "-"]
     else:
         args += ["-i", str(source)]
-    if filters:
-        args += ["-af", filters]
+    # resample first so a chain written for 44.1 kHz (asetrate=44100*0.9) means the same for 24 kHz TTS output
+    args += ["-af", f"aresample={RATE}" + (f",{filters}" if filters else "")]
     args += ["-f", "s16le", "-ar", str(RATE), "-ac", "2", "-"]
     raw = subprocess.run(args, check=True, capture_output=True, timeout=120,
                          input=source if isinstance(source, bytes) else None).stdout

@@ -72,3 +72,19 @@ class PushToTalkTests(unittest.TestCase):
             self.assertIsNone(listener.recording)
 
         asyncio.run(go())
+
+
+class VoiceFxTests(unittest.TestCase):
+    def dominant_hz(self, pcm: np.ndarray) -> float:
+        mono = pcm[:, 0].astype(np.float64)
+        spectrum = np.abs(np.fft.rfft(mono))
+        return float(np.fft.rfftfreq(len(mono), 1 / skelly_mac.RATE)[np.argmax(spectrum)])
+
+    def test_pitch_down_is_relative_to_output_rate_for_24k_tts(self):
+        rate = 24000
+        tone = (0.5 * np.sin(2 * np.pi * 1000 * np.arange(rate * 2) / rate)).astype(np.float32)
+        plain = skelly_mac.decode_audio(tone.tobytes(), None, rate)
+        pitched = skelly_mac.decode_audio(tone.tobytes(), "asetrate=44100*0.9,aresample=44100", rate)
+        self.assertAlmostEqual(self.dominant_hz(plain), 1000, delta=5)
+        self.assertAlmostEqual(self.dominant_hz(pitched), 900, delta=5)  # down, never a chipmunk
+        self.assertAlmostEqual(len(pitched) / len(plain), 1 / 0.9, delta=0.02)
