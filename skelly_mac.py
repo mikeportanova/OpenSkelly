@@ -63,6 +63,10 @@ def bt_connected(mac: str) -> bool:
     return run("blueutil", "--is-connected", mac, timeout=10).strip() == "1"
 
 
+def bt_paired(mac: str) -> bool:
+    return re.search(r"(?<!not )paired", run("blueutil", "--info", mac, timeout=10)) is not None
+
+
 class Skelly:
     """One BLE control session: `async with Skelly(address) as skelly: await skelly.write(...)`."""
 
@@ -107,7 +111,7 @@ async def find_ble_address(timeout: float = 15) -> str:
     return device.address
 
 
-def output_device_index(name: str = LIVE_NAME, wait: float = 10) -> int:
+def output_device_index(name: str = LIVE_NAME, wait: float = 20) -> int:
     deadline = time.monotonic() + wait
     while True:
         sd._terminate()  # ponytail: PortAudio caches the device list; re-init to see a new BT sink
@@ -199,11 +203,11 @@ async def cmd_configure(args: argparse.Namespace) -> int:
                 subprocess.run(pair, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
             except subprocess.TimeoutExpired:
                 pass
-            if run("blueutil", "--is-paired", live_mac).strip() != "1":
+            if not bt_paired(live_mac):
                 print(f"Automatic pairing failed. Open System Settings > Bluetooth, pair {LIVE_NAME} "
                       "(enter the PIN from the box or the DecorPro app if asked), then press Enter here.")
                 await asyncio.to_thread(input)
-                if run("blueutil", "--is-paired", live_mac).strip() != "1":
+                if not bt_paired(live_mac):
                     print(f"{LIVE_NAME} is still not paired; retry with: configure --pin <PIN>", file=sys.stderr)
                     return 1
             run("blueutil", "--disconnect", live_mac)
