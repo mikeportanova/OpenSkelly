@@ -35,6 +35,7 @@ LIVE_NAME = "12ft Skelly(Live)"
 CONFIG_FILE = Path.home() / ".config" / "openskelly" / "mac.json"
 CONTROL_SOCKET = Path(__file__).resolve().parent / ".skelly-live" / "mac.sock"
 RATE = 44100
+TAIL_SECONDS = 0.7  # silence appended to every clip
 TTS_MODELS = {
     "kokoro": "mlx-community/Kokoro-82M-bf16",
     "qwen": "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-4bit",
@@ -183,8 +184,9 @@ def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None 
         args += ["-f", "f32le", "-ar", str(in_rate), "-ac", "1", "-i", "-"]
     else:
         args += ["-i", str(source)]
-    # resample first so a chain written for 44.1 kHz (asetrate=44100*0.9) means the same for 24 kHz TTS output
-    args += ["-af", f"aresample={RATE}" + (f",{filters}" if filters else "")]
+    # resample first so a chain written for 44.1 kHz (asetrate=44100*0.9) means the same for 24 kHz TTS output;
+    # pad the end so the Bluetooth buffer flushes the last word and the echo tail instead of clipping it
+    args += ["-af", f"aresample={RATE}" + (f",{filters}" if filters else "") + f",apad=pad_dur={TAIL_SECONDS}"]
     args += ["-f", "s16le", "-ar", str(RATE), "-ac", "2", "-"]
     raw = subprocess.run(args, check=True, capture_output=True, timeout=120,
                          input=source if isinstance(source, bytes) else None).stdout

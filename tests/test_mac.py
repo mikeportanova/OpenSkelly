@@ -87,4 +87,12 @@ class VoiceFxTests(unittest.TestCase):
         pitched = skelly_mac.decode_audio(tone.tobytes(), "asetrate=44100*0.9,aresample=44100", rate)
         self.assertAlmostEqual(self.dominant_hz(plain), 1000, delta=5)
         self.assertAlmostEqual(self.dominant_hz(pitched), 900, delta=5)  # down, never a chipmunk
-        self.assertAlmostEqual(len(pitched) / len(plain), 1 / 0.9, delta=0.02)
+        tail = skelly_mac.TAIL_SECONDS * skelly_mac.RATE
+        self.assertAlmostEqual((len(pitched) - tail) / (len(plain) - tail), 1 / 0.9, delta=0.02)
+
+    def test_every_clip_ends_with_silence(self):
+        rate = 24000
+        tone = (0.5 * np.sin(2 * np.pi * 440 * np.arange(rate) / rate)).astype(np.float32)
+        pcm = skelly_mac.decode_audio(tone.tobytes(), None, rate)
+        self.assertAlmostEqual(len(pcm) / skelly_mac.RATE, 1 + skelly_mac.TAIL_SECONDS, delta=0.05)
+        self.assertEqual(int(np.abs(pcm[-int(0.5 * skelly_mac.RATE):]).max()), 0)
