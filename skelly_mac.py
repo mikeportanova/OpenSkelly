@@ -234,6 +234,20 @@ def stop_playback() -> None:
 
 
 _tts_model: object = None
+
+
+def load_tts_model(engine: str) -> object:
+    """Load an mlx-audio TTS model without transformers' harmless config-type warning."""
+    import logging
+
+    from mlx_audio.tts.utils import load_model
+
+    logging.getLogger("transformers").setLevel(logging.ERROR)
+    import io
+    from contextlib import redirect_stdout
+
+    with redirect_stdout(io.StringIO()):  # "Initialized encoder codebooks" / "Loaded speech tokenizer" chatter
+        return load_model(TTS_MODELS[engine])
 _tts_executor = ThreadPoolExecutor(max_workers=1)  # MLX generation is not reentrant: one sentence at a time
 STREAM_RATE = 24000  # mlx TTS output
 FILLER_AFTER = 1.2  # seconds of silence after the kid stops before a filler covers the wait
@@ -251,10 +265,8 @@ def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
         subprocess.run(["say", "-v", config["voice"], "-o", str(path), f"--data-format=LEI16@{RATE}", "--", text],
                        check=True, timeout=60)
         return path, None
-    from mlx_audio.tts.utils import load_model
-
     if _tts_model is None:
-        _tts_model = load_model(TTS_MODELS[config["tts"]])
+        _tts_model = load_tts_model(config["tts"])
     if config["tts"] == "kokoro":
         results = _tts_model.generate(text, voice=config["voice"], speed=0.85, lang_code="a")
     elif config["tts"] == "clone":
@@ -276,10 +288,8 @@ def synthesize(text: str, config: dict) -> tuple[Path | bytes, int | None]:
 def synthesize_stream(text: str, config: dict) -> Iterator[bytes]:
     """Clone/design TTS as mono float32 chunks at STREAM_RATE, yielded while the model is still generating."""
     global _tts_model
-    from mlx_audio.tts.utils import load_model
-
     if _tts_model is None:
-        _tts_model = load_model(TTS_MODELS[config["tts"]])
+        _tts_model = load_tts_model(config["tts"])
     if config["tts"] == "clone":
         results = _tts_model.generate(text, ref_audio=str(VOICE_REF), ref_text=config["voice_ref_text"], lang_code="en",
                                       stream=True, streaming_interval=1.0)
