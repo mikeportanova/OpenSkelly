@@ -63,8 +63,9 @@ DEFAULTS = {
                 "alimiter=limit=0.9:attack=5:release=60:level=0",
     # Jaw articulation: the Skelly opens its jaw on almost any sound (threshold ~ -37 dB) and needs ~250 ms per
     # open/close, while TTS speech never goes quiet between words. This ducks every 10 ms frame that falls under
-    # `jaw_ratio` of the recent peak down to near silence, so the jaw visibly closes at syllable valleys. 0 = off.
-    "jaw_ratio": 0.5,
+    # `jaw_ratio` of the recent peak down to near silence, so the jaw visibly closes at syllable valleys. 0 = off;
+    # off by default: on the real Skelly the plain chain looked better (A/B 2026-10-22). Try 0.4 if you want more.
+    "jaw_ratio": 0,
     "model": "claude-haiku-5-5",  # chat model; Haiku answers fastest, which is what a kid at the door needs
     "filler": True,  # play a short cloned interjection when the reply takes longer than FILLER_AFTER
     "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
