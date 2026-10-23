@@ -605,7 +605,7 @@ async def cmd_configure(args: argparse.Namespace) -> int:
     if args.voice_fx is not None:
         config["voice_fx"] = args.voice_fx
     CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    save_config(config)  # only what differs from DEFAULTS, so future default changes still apply
     print(f"Saved {CONFIG_FILE}\n{json.dumps(config, indent=2)}")
     return 0
 
@@ -623,7 +623,7 @@ def cmd_voice_design(args: argparse.Namespace) -> int:
     subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(rate), "-ac", "1",
                     "-i", "-", str(VOICE_REF)], input=pcm, check=True)
     config.update({"tts": "clone", "voice_seed": design["voice_seed"], "voice_instruct": design["voice_instruct"]})
-    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+    save_config(config)  # only what differs from DEFAULTS, so future default changes still apply
     print(f"Saved {VOICE_REF}; tts=clone. Restart serve/talk to use it.")
     return 0
 

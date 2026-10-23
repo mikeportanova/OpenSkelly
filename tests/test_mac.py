@@ -398,3 +398,19 @@ class ArticulatorTests(unittest.TestCase):
         pieces = [streamer.process(pcm[i:i + 1000]) for i in range(0, len(pcm), 1000)] + [streamer.process(pcm[:0], final=True)]
         np.testing.assert_array_equal(np.concatenate(pieces), whole)
         self.assertEqual(len(skelly_mac.Articulator(0).process(pcm, final=True)), len(pcm))
+
+
+class SaveConfigTests(unittest.TestCase):
+    def test_defaults_are_not_baked_into_the_file(self):
+        import json, tempfile
+
+        original = skelly_mac.CONFIG_FILE
+        with tempfile.TemporaryDirectory() as d:
+            skelly_mac.CONFIG_FILE = Path(d) / "mac.json"
+            try:
+                skelly_mac.save_config({**skelly_mac.DEFAULTS, "mic_device": "Yeti", "live_mac": "AA"})
+                saved = json.loads(skelly_mac.CONFIG_FILE.read_text())
+            finally:
+                skelly_mac.CONFIG_FILE = original
+        self.assertEqual(saved, {"mic_device": "Yeti", "live_mac": "AA"})
+        self.assertNotIn("voice_fx", saved)
