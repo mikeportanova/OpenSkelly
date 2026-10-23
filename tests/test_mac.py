@@ -380,3 +380,21 @@ class JawTestTests(unittest.TestCase):
         peak_db = 20 * np.log10(np.abs(a).max())
         self.assertAlmostEqual(peak_db, -3, delta=0.2)  # loudest step is exactly -3 dB
         self.assertGreater(len(a) / skelly_mac.RATE, 15)  # staircase + four burst trains
+
+
+class ArticulatorTests(unittest.TestCase):
+    def test_valleys_are_ducked_and_streaming_matches_whole(self):
+        rate = skelly_mac.RATE
+        t = np.arange(rate) / rate
+        env = np.where((t % 0.25) < 0.15, 1.0, 0.3)  # 4 syllables/s: loud 150 ms, soft 100 ms
+        mono = (0.5 * env * np.sin(2 * np.pi * 220 * t) * 32767).astype(np.int16)
+        pcm = np.column_stack([mono, mono])
+        whole = skelly_mac.Articulator(0.5).process(pcm, final=True)
+        soft = whole[int(0.2 * rate):int(0.24 * rate), 0]
+        loud = whole[int(0.05 * rate):int(0.1 * rate), 0]
+        self.assertLess(np.abs(soft).max(), 0.05 * 32767 * 0.5 * 0.3 + 1)  # ducked ~30 dB
+        self.assertGreater(np.abs(loud).max(), 0.4 * 32767)  # untouched
+        streamer = skelly_mac.Articulator(0.5)
+        pieces = [streamer.process(pcm[i:i + 1000]) for i in range(0, len(pcm), 1000)] + [streamer.process(pcm[:0], final=True)]
+        np.testing.assert_array_equal(np.concatenate(pieces), whole)
+        self.assertEqual(len(skelly_mac.Articulator(0).process(pcm, final=True)), len(pcm))

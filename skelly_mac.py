@@ -59,8 +59,12 @@ DEFAULTS = {
     # ffmpeg chain before the jaw: slight pitch-down, light echo, fixed gain, a gate that deepens the dips
     # between syllables (the Skelly opens its jaw on level, so dips = jaw closing), and a peak limiter.
     # Every filter is stream-safe: no loudnorm/compressor, they fill the gaps and the jaw just hangs open.
-    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.7:40|90:0.25|0.12,volume=16dB,"
-                "agate=threshold=0.04:ratio=6:attack=4:release=50,alimiter=limit=0.9:attack=5:release=60:level=0",
+    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.6:30|70:0.18|0.08,volume=19dB,"
+                "alimiter=limit=0.9:attack=5:release=60:level=0",
+    # Jaw articulation: the Skelly opens its jaw on almost any sound (threshold ~ -37 dB) and needs ~250 ms per
+    # open/close, while TTS speech never goes quiet between words. This ducks every 10 ms frame that falls under
+    # `jaw_ratio` of the recent peak down to near silence, so the jaw visibly closes at syllable valleys. 0 = off.
+    "jaw_ratio": 0.5,
     "model": "claude-haiku-5-5",  # chat model; Haiku answers fastest, which is what a kid at the door needs
     "filler": True,  # play a short cloned interjection when the reply takes longer than FILLER_AFTER
     "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
@@ -225,6 +229,37 @@ def decode_audio(source: Path | bytes, filters: str | None, in_rate: int | None 
     return np.frombuffer(raw, dtype=np.int16).reshape(-1, 2)
 
 
+class Articulator:
+    """Relative syllable gate (see `jaw_ratio`); stateful so it can run over streamed frames."""
+
+    FRAME = RATE // 100  # 10 ms
+    FLOOR = 0.03  # -30 dB duck: below the jaw's threshold, above inaudible
+
+    def __init__(self, ratio: float, decay: float = 0.985) -> None:
+        self.ratio, self.decay = ratio, decay
+        self.peak = 1e-4
+        self.rest = np.zeros((0, 2), dtype=np.int16)
+
+    def process(self, pcm: np.ndarray, final: bool = False) -> np.ndarray:
+        if not self.ratio:
+            return pcm
+        data = np.concatenate([self.rest, pcm]) if len(self.rest) else pcm
+        whole = len(data) // self.FRAME * self.FRAME if not final else len(data)
+        out = data[:whole].astype(np.float32)
+        for i in range(0, whole, self.FRAME):
+            seg = out[i:i + self.FRAME]
+            rms = float(np.sqrt(np.mean((seg[:, 0] / 32768) ** 2)))
+            self.peak = max(rms, self.peak * self.decay)
+            if rms < self.ratio * self.peak:
+                seg *= self.FLOOR
+        self.rest = data[whole:]
+        return out.astype(np.int16)
+
+
+def articulate(pcm: np.ndarray, config: dict) -> np.ndarray:
+    return Articulator(float(config.get("jaw_ratio") or 0)).process(pcm, final=True)
+
+
 def play_pcm(pcm: np.ndarray, device: int) -> None:
     sd.play(pcm, RATE, device=device, blocking=True)
 
@@ -358,12 +393,19 @@ class StreamJob:
         self.proc.wait()
 
     def play(self, device: int) -> None:
+        jaw = Articulator(float(self.config.get("jaw_ratio") or 0))
         with sd.RawOutputStream(samplerate=RATE, channels=2, dtype="int16", device=device) as out:
             for frame in self.frames():
                 if self.stopped:
                     out.abort()
                     break
-                out.write(frame)
+                shaped = jaw.process(np.frombuffer(frame, dtype=np.int16).reshape(-1, 2))
+                if len(shaped):
+                    out.write(shaped.tobytes())
+            if not self.stopped:
+                tail = jaw.process(np.zeros((0, 2), dtype=np.int16), final=True)
+                if len(tail):
+                    out.write(tail.tobytes())
 
 
 def filler_pcm(config: dict, text: str) -> np.ndarray:
@@ -373,17 +415,18 @@ def filler_pcm(config: dict, text: str) -> np.ndarray:
     if path.exists():
         return np.load(path)
     source, rate = synthesize(text, config)
-    pcm = decode_audio(source, config["voice_fx"] or None, rate, pad=False)  # the real answer follows at once
+    pcm = articulate(decode_audio(source, config["voice_fx"] or None, rate, pad=False), config)  # the answer follows at once
     FILLER_DIR.mkdir(parents=True, exist_ok=True)
     np.save(path, pcm)
     return pcm
 
 
 async def render(text: str, config: dict) -> np.ndarray:
-    """TTS -> ffmpeg effects -> PCM ready for the jaw."""
+    """TTS -> ffmpeg effects -> jaw articulation -> PCM ready for the jaw."""
     source, rate = await asyncio.to_thread(synthesize, text, config)
     try:
-        return await asyncio.to_thread(decode_audio, source, config["voice_fx"] or None, rate)
+        pcm = await asyncio.to_thread(decode_audio, source, config["voice_fx"] or None, rate)
+        return articulate(pcm, config)
     finally:
         if isinstance(source, Path):
             source.unlink(missing_ok=True)
