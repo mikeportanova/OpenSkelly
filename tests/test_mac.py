@@ -364,3 +364,19 @@ class RefusalTests(unittest.TestCase):
 
     async def _collect(self, brain):
         return [s async for s in brain.reply("hi")]
+
+
+class JawTestTests(unittest.TestCase):
+    def test_staircase_levels_and_burst_rates(self):
+        import subprocess, tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            path = Path(tmp.name)
+        skelly_mac.jaw_test_wav(path)
+        raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-i", str(path), "-f", "f32le", "-ac", "1", "-"],
+                             capture_output=True, check=True).stdout
+        path.unlink()
+        a = np.frombuffer(raw, dtype=np.float32)
+        peak_db = 20 * np.log10(np.abs(a).max())
+        self.assertAlmostEqual(peak_db, -3, delta=0.2)  # loudest step is exactly -3 dB
+        self.assertGreater(len(a) / skelly_mac.RATE, 15)  # staircase + four burst trains

@@ -56,10 +56,11 @@ DEFAULTS = {
                       "cavernous and hollow.",
     "voice_seed": 42,  # VoiceDesign seed used by `voice design` to render the reference clip
     "voice_ref_text": REF_TEXT,
-    # ffmpeg chain before the jaw: slight pitch-down, cavern echo, then level for the mouth threshold.
-    # Every filter here is stream-safe (no loudnorm: it needs the whole clip and the voice is streamed).
-    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.85:60|130:0.45|0.25,"
-                "acompressor=threshold=-24dB:ratio=3:attack=5:release=120:makeup=8,volume=5dB,alimiter=limit=0.9:attack=5:release=60",
+    # ffmpeg chain before the jaw: slight pitch-down, light echo, fixed gain, a gate that deepens the dips
+    # between syllables (the Skelly opens its jaw on level, so dips = jaw closing), and a peak limiter.
+    # Every filter is stream-safe: no loudnorm/compressor, they fill the gaps and the jaw just hangs open.
+    "voice_fx": "asetrate=44100*0.9,aresample=44100,aecho=0.8:0.7:40|90:0.25|0.12,volume=16dB,"
+                "agate=threshold=0.04:ratio=6:attack=4:release=50,alimiter=limit=0.9:attack=5:release=60:level=0",
     "model": "claude-haiku-5-5",  # chat model; Haiku answers fastest, which is what a kid at the door needs
     "filler": True,  # play a short cloned interjection when the reply takes longer than FILLER_AFTER
     "persona": None,  # what Skelly is like and how he answers; None = talk.PERSONA. `instruct` only shapes the voice sound
@@ -433,7 +434,7 @@ class Session:
                 if request["cmd"] == "say":
                     await speak(request["text"], self.config, self.device)
                 elif request["cmd"] == "play":
-                    pcm = decode_audio(Path(request["path"]), "loudnorm=I=-10:TP=-1:LRA=11")
+                    pcm = decode_audio(Path(request["path"]), None if request.get("raw") else "loudnorm=I=-10:TP=-1:LRA=11")
                     await asyncio.to_thread(play_pcm, pcm, self.device)
                 elif request["cmd"] == "frames":
                     for frame in request["frames"]:
@@ -592,12 +593,30 @@ async def cmd_frames(frames: list[str]) -> int:
     return 0
 
 
-async def cmd_play(path: Path) -> int:
-    if send_to_server({"cmd": "play", "path": str(path.resolve())}):
+def jaw_test_wav(path: Path) -> None:
+    """Tone bursts: a level staircase, then bursts at rising rates, to see what the jaw follows."""
+    t = np.arange(int(0.5 * RATE)) / RATE
+    burst = np.sin(2 * np.pi * 220 * t) * np.hanning(len(t))
+    gap = np.zeros(int(0.6 * RATE))
+    parts = [gap]
+    for db in (-3, -9, -15, -21, -27, -33, -39):
+        parts += [burst * 10 ** (db / 20), gap]
+    parts.append(np.zeros(RATE))
+    for per_second in (2, 4, 6, 8):
+        on, off = int(RATE / per_second * 0.5), int(RATE / per_second * 0.5)
+        pulse = np.sin(2 * np.pi * 220 * np.arange(on) / RATE) * np.hanning(on) * 10 ** (-9 / 20)
+        parts += [np.tile(np.concatenate([pulse, np.zeros(off)]), per_second * 3), gap, gap]
+    mono = np.concatenate(parts).astype(np.float32)
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(RATE), "-ac", "1",
+                    "-i", "-", str(path)], input=mono.tobytes(), check=True)
+
+
+async def cmd_play(path: Path, raw: bool = False) -> int:
+    if send_to_server({"cmd": "play", "path": str(path.resolve()), "raw": raw}):
         return 0
     config = load_config()
     print("Preparing audio…", flush=True)
-    pcm = decode_audio(path, "loudnorm=I=-10:TP=-1:LRA=11,adelay=2000|2000,apad=pad_dur=0.75")
+    pcm = decode_audio(path, None if raw else "loudnorm=I=-10:TP=-1:LRA=11,adelay=2000|2000,apad=pad_dur=0.75")
     async with Skelly(config["ble_address"]) as skelly:
         device = await connect_live(skelly, config["live_mac"])
         try:
@@ -656,6 +675,9 @@ def main() -> int:
     eyes.add_argument("pattern", type=int, choices=range(1, 21), metavar="1-20")
     play = subs.add_parser("play", help="play an audio file through Skelly with jaw animation")
     play.add_argument("audio", type=Path)
+    play.add_argument("--raw", action="store_true", help="no loudness normalization; the file as it is")
+    jaw = subs.add_parser("jaw", help="jaw experiments")
+    jaw.add_argument("jaw_action", choices=("test",), help="test: level staircase (-3..-39 dB) then 2/4/6/8 bursts per second")
     say = subs.add_parser("say", help="speak a line through Skelly")
     voice = subs.add_parser("voice", help="manage the cloned skeleton voice")
     voice_subs = voice.add_subparsers(dest="voice_action", required=True)
@@ -686,7 +708,16 @@ def main() -> int:
         if args.action == "eyes":
             return asyncio.run(cmd_frames([eye_frame(args.pattern)]))
         if args.action == "play":
-            return asyncio.run(cmd_play(args.audio))
+            return asyncio.run(cmd_play(args.audio, args.raw))
+        if args.action == "jaw":
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                path = Path(tmp.name)
+            jaw_test_wav(path)
+            print("Watch the jaw: seven bursts getting quieter (-3 dB to -39 dB), then bursts at 2, 4, 6 and 8 per second.")
+            try:
+                return asyncio.run(cmd_play(path, raw=True))
+            finally:
+                path.unlink(missing_ok=True)
         if args.action == "say":
             return asyncio.run(cmd_say(args.text))
         if args.action == "voice":
