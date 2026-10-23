@@ -61,6 +61,7 @@ class PushToTalkTests(unittest.TestCase):
             listener.recording = None
             listener.queue = asyncio.Queue()
             listener.loop = asyncio.get_running_loop()
+            listener.silero, listener.armed, listener.speech_prob = None, False, 0.5
             block = np.zeros((talk.BLOCK, 1), dtype=np.float32)
             listener.begin()
             for _ in range(3):
@@ -132,6 +133,7 @@ class HandsFreeTests(unittest.TestCase):
             listener = talk.Listener.__new__(talk.Listener)
             listener.rate, listener.muted, listener.recording, listener.handsfree = talk.MIC_RATE, False, None, False
             listener.queue, listener.loop = asyncio.Queue(), asyncio.get_running_loop()
+            listener.silero, listener.armed, listener.speech_prob = None, False, 0.5
             listener.segmenter = talk.Segmenter(0.02)
             quiet = np.full((talk.BLOCK, 1), 0.001, dtype=np.float32)
             loud = np.full((talk.BLOCK, 1), 0.1, dtype=np.float32)
@@ -268,6 +270,7 @@ class BargeInTests(unittest.TestCase):
             listener = talk.Listener.__new__(talk.Listener)
             listener.rate, listener.muted, listener.recording, listener.handsfree = talk.MIC_RATE, True, None, True
             listener.queue, listener.loop = asyncio.Queue(), asyncio.get_running_loop()
+            listener.silero, listener.armed, listener.speech_prob = None, False, 0.5
             listener.segmenter = talk.Segmenter(0.02)
             listener.vad_threshold = 0.02
             listener.barge_in = asyncio.Event()
@@ -414,3 +417,58 @@ class SaveConfigTests(unittest.TestCase):
                 skelly_mac.CONFIG_FILE = original
         self.assertEqual(saved, {"mic_device": "Yeti", "live_mac": "AA"})
         self.assertNotIn("voice_fx", saved)
+
+
+class SileroTests(unittest.TestCase):
+    def test_segmenter_takes_an_external_speech_decision(self):
+        seg = talk.Segmenter(threshold=0.02)
+        loud_but_not_voice = np.full(talk.BLOCK, 0.2, dtype=np.float32)
+        self.assertTrue(all(seg.feed(loud_but_not_voice, loud=False) is None for _ in range(20)))
+        self.assertFalse(seg.active)  # a loud car is not speech
+        for _ in range(5):
+            seg.feed(loud_but_not_voice, loud=True)
+        self.assertTrue(seg.active)
+
+    def test_silero_resamples_and_scores(self):
+        vad = talk.SileroVAD()
+        rate = 48000
+        rng = np.random.default_rng(1)
+        noise = rng.normal(0, 0.05, rate).astype(np.float32)
+        self.assertLess(vad.feed(noise, rate), 0.2)
+        vad.reset()
+        self.assertEqual(len(vad.buffer), 0)
+
+    def test_callback_uses_voice_not_level_and_level_gate_when_armed(self):
+        import asyncio
+
+        async def go():
+            listener = talk.Listener.__new__(talk.Listener)
+            listener.rate, listener.muted, listener.recording, listener.handsfree = talk.MIC_RATE, False, None, True
+            listener.queue, listener.loop = asyncio.Queue(), asyncio.get_running_loop()
+            listener.silero, listener.armed, listener.speech_prob = None, False, 0.5
+            listener.segmenter = talk.Segmenter(0.02)
+            listener.vad_threshold, listener.speech_prob, listener.armed = 0.02, 0.5, False
+            listener.barge_in = asyncio.Event()
+            listener.segmenter.on_start = lambda: None
+            fake = type("F", (), {"prob": 0.0, "feed": lambda self, block, rate: self.prob})()
+            listener.silero = fake
+            loud = np.full((talk.BLOCK, 1), 0.2, dtype=np.float32)
+            quiet_voice = np.full((talk.BLOCK, 1), 0.01, dtype=np.float32)
+            fake.prob = 0.1
+            for _ in range(10):
+                listener._callback(loud, talk.BLOCK, None, None)
+            self.assertFalse(listener.segmenter.active)  # loud non-voice ignored
+            fake.prob = 0.95
+            for _ in range(5):
+                listener._callback(quiet_voice, talk.BLOCK, None, None)
+            self.assertTrue(listener.segmenter.active)  # quiet voice counts
+            listener.segmenter.reset()
+            listener.arm_barge_in(0.1)
+            for _ in range(10):
+                listener._callback(quiet_voice, talk.BLOCK, None, None)
+            self.assertFalse(listener.segmenter.active)  # Skelly's own voice at the mic stays under the gate
+            for _ in range(6):
+                listener._callback(loud, talk.BLOCK, None, None)
+            self.assertTrue(listener.segmenter.active)  # a kid over the bleed
+
+        asyncio.run(go())

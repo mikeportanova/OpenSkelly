@@ -148,8 +148,9 @@ an ffmpeg filter chain applied before the jaw; prepend
 first use (Qwen is about 1 GB). `mic_device` picks the microphone by name (e.g.
 `"Yeti"`; set it to cardioid and point it at the kids). The window's
 **Hands-free** button switches from push-to-talk to listening for voices: a turn
-starts when the mic level crosses `vad_threshold` (the meter at the bottom shows
-the level against it; `talk --listen-test` prints it) and ends after
+starts when the Silero neural voice detector hears a human voice (`vad_prob`;
+cars, wind and the Skelly's own jingle do not count; set `vad` to `energy` for
+the plain level gate on `vad_threshold`, which the meter shows) and ends after
 `vad_silence` seconds of quiet; short fragments and Whisper's noise
 hallucinations are ignored. `talk --vad` starts hands-free without the window.
 Hands-free can let a kid interrupt Skelly mid-sentence: press **Calibrate** once

@@ -68,8 +68,10 @@ class Segmenter:
         self.buffer: list[np.ndarray] = []
         self.preroll.clear()
 
-    def feed(self, block: np.ndarray) -> np.ndarray | None:
-        loud = float(np.sqrt(np.mean(block**2))) > self.threshold
+    def feed(self, block: np.ndarray, loud: bool | None = None) -> np.ndarray | None:
+        """`loud` = this block counts as speech; by default an RMS energy threshold decides."""
+        if loud is None:
+            loud = float(np.sqrt(np.mean(block**2))) > self.threshold
         if not self.active:
             self.preroll.append(block)
             self.loud = self.loud + 1 if loud else 0
@@ -105,9 +107,47 @@ def to_whisper_rate(audio: np.ndarray, rate: int) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.float32)
 
 
+class SileroVAD:
+    """Neural speech detector (pysilero-vad): 'is this a human voice?' instead of 'is this loud?'."""
+
+    CHUNK = 512  # samples at MIC_RATE, 32 ms
+
+    def __init__(self) -> None:
+        from pysilero_vad import SileroVoiceActivityDetector
+
+        self.model = SileroVoiceActivityDetector()
+        self.buffer = np.zeros(0, dtype=np.float32)
+        self.prob = 0.0
+
+    def feed(self, block: np.ndarray, rate: int) -> float:
+        """Accumulate a mono block at `rate`; returns the latest speech probability."""
+        if rate != MIC_RATE:
+            n = int(len(block) * MIC_RATE / rate)
+            block = np.interp(np.linspace(0, len(block), n, endpoint=False), np.arange(len(block)), block).astype(np.float32)
+        self.buffer = np.concatenate([self.buffer, block])
+        while len(self.buffer) >= self.CHUNK:
+            chunk, self.buffer = self.buffer[: self.CHUNK], self.buffer[self.CHUNK:]
+            self.prob = float(self.model.process_chunk((np.clip(chunk, -1, 1) * 32767).astype(np.int16).tobytes()))
+        return self.prob
+
+    def reset(self) -> None:
+        self.model.reset()
+        self.buffer = np.zeros(0, dtype=np.float32)
+        self.prob = 0.0
+
+
 class Listener:
-    def __init__(self, threshold: float, device: int | str | None = None, silence_seconds: float = 0.8) -> None:
+    def __init__(self, threshold: float, device: int | str | None = None, silence_seconds: float = 0.8,
+                 vad: str = "silero", speech_prob: float = 0.5) -> None:
         self.segmenter = Segmenter(threshold, silence_blocks=int(silence_seconds * 1000 / 30))
+        self.speech_prob = speech_prob
+        self.silero: SileroVAD | None = None
+        if vad == "silero":
+            try:
+                self.silero = SileroVAD()
+            except Exception as exc:  # package missing: fall back to the energy gate
+                print(f"silero VAD unavailable ({exc}); using the energy threshold", flush=True)
+        self.armed = False  # barge-in: Skelly is talking, so a voice must also be above the level gate
         self.queue: asyncio.Queue[np.ndarray] = asyncio.Queue()
         self.muted = False
         self.handsfree = False  # only then do blocks flow to the VAD queue
@@ -132,10 +172,14 @@ class Listener:
         """Audio thread: the VAD runs here so speech starts are seen even while Skelly is talking."""
         mono = indata[:, 0].copy()
         self.level = float(np.sqrt(np.mean(mono**2)))
+        prob = self.silero.feed(mono, self.rate) if self.silero else None
         if self.recording is not None:
             self.recording.append(mono)
         elif self.handsfree and not self.muted:
-            utterance = self.segmenter.feed(mono)
+            loud = None
+            if prob is not None:  # a voice, and while Skelly talks, a voice louder than his bleed
+                loud = prob > self.speech_prob and (not self.armed or self.level > self.segmenter.threshold)
+            utterance = self.segmenter.feed(mono, loud)
             if utterance is not None:
                 self.loop.call_soon_threadsafe(self.queue.put_nowait, utterance)
 
@@ -148,6 +192,7 @@ class Listener:
         """Skelly is about to talk: keep listening, but only a voice well above his bleed counts."""
         self.segmenter.threshold = threshold
         self.segmenter.start_blocks = 5  # 150 ms, so jaw clicks and echo transients do not trip it
+        self.armed = True
         self.barge_in.clear()
         self.muted = False
         self.segmenter.reset()
@@ -155,6 +200,7 @@ class Listener:
     def disarm_barge_in(self) -> None:
         self.segmenter.threshold = self.vad_threshold
         self.segmenter.start_blocks = 3
+        self.armed = False
 
     def begin(self) -> None:
         self.recording = []
@@ -301,7 +347,9 @@ async def run(session: object, vad: bool = False) -> None:
         return fillers[choice]
 
     brain = Brain(config.get("model", MODEL), config.get("persona") or PERSONA)
-    listener = Listener(config["vad_threshold"], config.get("mic_device"), float(config.get("vad_silence", 1.2)))
+    listener = Listener(config["vad_threshold"], config.get("mic_device"), float(config.get("vad_silence", 1.2)),
+                        config.get("vad", "silero"), float(config.get("vad_prob", 0.5)))
+    print("speech detection:", "silero" if listener.silero else "energy threshold", flush=True)
     listener.set_handsfree(vad)
     session.listener = listener
     calibrating: list[asyncio.Task] = []
@@ -519,9 +567,12 @@ def listen_test(config: dict) -> int:
     print(f"threshold={config['vad_threshold']}; speak at Skelly distance for 5 s", flush=True)
     end = time.monotonic() + 5
     rate = int(sd.query_devices(config.get("mic_device"), "input")["default_samplerate"])
+    silero = SileroVAD() if config.get("vad", "silero") == "silero" else None
     with sd.InputStream(samplerate=rate, channels=1, dtype="float32", device=config.get("mic_device")) as s:
         while time.monotonic() < end:
             block, _ = s.read(rate // 4)
             rms = float(np.sqrt(np.mean(block**2)))
-            print(f"rms={rms:.4f} {'SPEECH' if rms > config['vad_threshold'] else ''}", flush=True)
+            prob = silero.feed(block[:, 0], rate) if silero else None
+            voice = f" voice={prob:.2f}{' SPEECH' if prob > config.get('vad_prob', 0.5) else ''}" if prob is not None else ""
+            print(f"rms={rms:.4f}{' LOUD' if rms > config['vad_threshold'] else ''}{voice}", flush=True)
     return 0
