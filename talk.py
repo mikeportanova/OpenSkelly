@@ -95,7 +95,13 @@ class Listener:
         self.barge_in = asyncio.Event()  # set when speech starts while Skelly is talking (armed only)
         self.segmenter.on_start = lambda: self.loop.call_soon_threadsafe(self.barge_in.set)
         self.loop = asyncio.get_running_loop()
-        self.rate = int(sd.query_devices(device, "input")["default_samplerate"])
+        try:
+            info = sd.query_devices(device, "input")
+        except ValueError:
+            print(f"microphone {device!r} not found (unplugged?); using {sd.query_devices(None, 'input')['name']}", flush=True)
+            device, info = None, sd.query_devices(None, "input")
+        print(f"microphone: {info['name']}", flush=True)
+        self.rate = int(info["default_samplerate"])
         self.stream = sd.InputStream(samplerate=self.rate, channels=1, dtype="float32",
                                      blocksize=BLOCK * self.rate // MIC_RATE, device=device, callback=self._callback)
 
