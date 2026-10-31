@@ -485,6 +485,10 @@ class Session:
                 elif request["cmd"] == "frames":
                     for frame in request["frames"]:
                         await self.skelly.write(frame)
+                elif request["cmd"] == "watch":  # collect BLE notifications for a while (sensor experiments)
+                    self.skelly.notifications.clear()
+                    await asyncio.sleep(float(request.get("seconds", 20)))
+                    request["result"] = list(self.skelly.notifications)
                 else:
                     raise ValueError(f"unknown command {request['cmd']!r}")
             finally:
@@ -507,6 +511,8 @@ async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
             response = {"ok": True}
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
+        if "result" in request:
+            response["result"] = request["result"]
         writer.write(json.dumps(response).encode() + b"\n")
         await writer.drain()
         writer.close()
@@ -570,7 +576,26 @@ def send_to_server(request: dict) -> bool:
         response = json.loads(client.makefile().readline())
     if not response.get("ok"):
         raise RuntimeError(response.get("error", "server command failed"))
+    request["result"] = response.get("result")
     return True
+
+
+async def cmd_sensor_watch(seconds: float) -> int:
+    """Print every BLE notification for `seconds`: wave at the sensor and see whether Skelly reports it."""
+    print(f"Watching Skelly's BLE notifications for {seconds:.0f} s; wave in front of the sensor now…", flush=True)
+    request = {"cmd": "watch", "seconds": seconds}
+    if send_to_server(request):
+        seen = request["result"]
+        print("(while in Live mode; the sensor may be inactive there)")
+    else:  # no session: plain BLE, no Live handshake, so the Skelly stays in its normal sensor mode
+        async with Skelly(load_config()["ble_address"]) as skelly:
+            await asyncio.sleep(seconds)
+            seen = list(skelly.notifications)
+    if not seen:
+        print("No notifications. The sensor does not report over BLE in this state.")
+    for frame in seen:
+        print(f"notification: {frame}")
+    return 0
 
 
 # ---------------------------------------------------------------- one-shot commands (fallback when no server runs)
@@ -722,6 +747,9 @@ def main() -> int:
     play = subs.add_parser("play", help="play an audio file through Skelly with jaw animation")
     play.add_argument("audio", type=Path)
     play.add_argument("--raw", action="store_true", help="no loudness normalization; the file as it is")
+    sensor = subs.add_parser("sensor", help="motion sensor experiments")
+    sensor.add_argument("sensor_action", choices=("watch",))
+    sensor.add_argument("--seconds", type=float, default=20)
     jaw = subs.add_parser("jaw", help="jaw experiments")
     jaw.add_argument("jaw_action", choices=("test",), help="test: level staircase (-3..-39 dB) then 2/4/6/8 bursts per second")
     say = subs.add_parser("say", help="speak a line through Skelly")
@@ -755,6 +783,8 @@ def main() -> int:
             return asyncio.run(cmd_frames([eye_frame(args.pattern)]))
         if args.action == "play":
             return asyncio.run(cmd_play(args.audio, args.raw))
+        if args.action == "sensor":
+            return asyncio.run(cmd_sensor_watch(args.seconds))
         if args.action == "jaw":
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 path = Path(tmp.name)
