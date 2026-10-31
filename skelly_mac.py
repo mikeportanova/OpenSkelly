@@ -30,6 +30,7 @@ from protocol import (
     light_brightness_frame,
     light_channel,
     light_color_frame,
+    protocol_frame,
 )
 
 AE01 = "0000ae01-0000-1000-8000-00805f9b34fb"
@@ -592,6 +593,28 @@ def send_to_server(request: dict) -> bool:
     return True
 
 
+SENSOR_MODE_FRAMES = {
+    # FE 01 is what the Live handshake sends ("select classic Bluetooth audio"); FE 00 is the
+    # candidate for the Skelly's normal onboard/sensor mode (experimental, mapped from the app's behavior)
+    "sensor": [protocol_frame(0xFE, bytes(8))],
+    "bluetooth": [COMMANDS["select_bluetooth"]],
+}
+
+
+async def cmd_sensor_mode(mode: str) -> int:
+    frames = SENSOR_MODE_FRAMES[mode]
+    print(f"sending {mode} mode frame(s): {' '.join(frames)}", flush=True)
+    if send_to_server({"cmd": "frames", "frames": frames}):
+        return 0
+    async with Skelly(load_config()["ble_address"]) as skelly:
+        for frame in frames:
+            await skelly.write(frame)
+        await asyncio.sleep(0.5)
+        if skelly.notifications:
+            print("replies:", " ".join(skelly.notifications), flush=True)
+    return 0
+
+
 async def cmd_sensor_watch(seconds: float) -> int:
     """Print every BLE notification for `seconds`: wave at the sensor and see whether Skelly reports it."""
     print(f"Watching Skelly's BLE notifications for {seconds:.0f} s; wave in front of the sensor now…", flush=True)
@@ -760,7 +783,8 @@ def main() -> int:
     play.add_argument("audio", type=Path)
     play.add_argument("--raw", action="store_true", help="no loudness normalization; the file as it is")
     sensor = subs.add_parser("sensor", help="motion sensor experiments")
-    sensor.add_argument("sensor_action", choices=("watch",))
+    sensor.add_argument("sensor_action", choices=("watch", "mode"))
+    sensor.add_argument("mode", nargs="?", choices=("sensor", "bluetooth"), help="for `mode`: which mode to select")
     sensor.add_argument("--seconds", type=float, default=20)
     jaw = subs.add_parser("jaw", help="jaw experiments")
     jaw.add_argument("jaw_action", choices=("test",), help="test: level staircase (-3..-39 dB) then 2/4/6/8 bursts per second")
@@ -796,6 +820,10 @@ def main() -> int:
         if args.action == "play":
             return asyncio.run(cmd_play(args.audio, args.raw))
         if args.action == "sensor":
+            if args.sensor_action == "mode":
+                if not args.mode:
+                    parser.error("sensor mode needs: sensor | bluetooth")
+                return asyncio.run(cmd_sensor_mode(args.mode))
             return asyncio.run(cmd_sensor_watch(args.seconds))
         if args.action == "jaw":
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
