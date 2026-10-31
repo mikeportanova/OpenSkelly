@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
 import re
 import signal
 import socket
@@ -539,8 +540,13 @@ async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
                     if failures in (1, 5) or failures % 20 == 0:
                         print(f"Skelly unreachable ({exc}); retrying in the background", flush=True)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):  # Ctrl-C = graceful stop: stop_live, disconnect, restore outputs
-        asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+    def install_signals() -> None:
+        """Ctrl-C = graceful stop. Tk installs its own SIGINT handler that calls exit(); re-run this after a window opens."""
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+
+    install_signals()
+    session.install_signals = install_signals
     CONTROL_SOCKET.parent.mkdir(exist_ok=True)
     CONTROL_SOCKET.unlink(missing_ok=True)
     server = await asyncio.start_unix_server(on_client, path=str(CONTROL_SOCKET))
@@ -854,4 +860,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    rc = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)  # skip C++ static teardown (torch aborts in it on macOS after the audio thread is gone)

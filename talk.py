@@ -343,6 +343,8 @@ async def run(session: object, vad: bool = False) -> None:
 
     config = session.config
     window = None if vad else __import__("ui").TalkWindow()
+    if window and getattr(session, "install_signals", None):
+        session.install_signals()  # Tk just replaced the SIGINT handler with one that exits immediately
     print("Loading speech models (first run downloads them)…", flush=True)
     await asyncio.to_thread(transcribe, np.zeros(MIC_RATE, dtype=np.float32), config["whisper_model"])
     await asyncio.to_thread(synthesize, "Boo.", config)
