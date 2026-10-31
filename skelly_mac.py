@@ -457,6 +457,7 @@ class Session:
             return
         if self.skelly:
             await self.skelly.__aexit__()
+            self.skelly = None
         print("Connecting to Skelly…", flush=True)
         self.skelly = await Skelly(self.config["ble_address"]).__aenter__()
         self.device = await connect_live(self.skelly, self.config["live_mac"])
@@ -466,7 +467,12 @@ class Session:
     async def close(self) -> None:
         if self.skelly:
             try:
-                await disconnect_live(self.skelly, self.config["live_mac"])
+                if self.skelly.client.is_connected:
+                    await asyncio.wait_for(disconnect_live(self.skelly, self.config["live_mac"]), 10)
+                else:
+                    run("blueutil", "--disconnect", self.config["live_mac"], timeout=10)
+            except Exception as exc:
+                print(f"(goodbye skipped: {exc})", flush=True)
             finally:
                 await self.skelly.__aexit__()
                 self.skelly = None
@@ -518,13 +524,19 @@ async def serve(config: dict, talk_mode: bool, vad: bool = False) -> int:
         writer.close()
 
     async def keepalive() -> None:
+        failures = 0
         while True:
-            await asyncio.sleep(3)
+            await asyncio.sleep(3 if not failures else min(30, 5 * failures))  # back off while Skelly is away
             async with session.lock:
                 try:
                     await session.ensure_connected()
+                    if failures:
+                        print("Skelly is back", flush=True)
+                    failures = 0
                 except Exception as exc:
-                    print(f"reconnect failed: {exc}", flush=True)
+                    failures += 1
+                    if failures in (1, 5) or failures % 20 == 0:
+                        print(f"Skelly unreachable ({exc}); retrying in the background", flush=True)
 
     for sig in (signal.SIGINT, signal.SIGTERM):  # Ctrl-C = graceful stop: stop_live, disconnect, restore outputs
         asyncio.get_running_loop().add_signal_handler(sig, stop.set)
